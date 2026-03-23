@@ -34,3 +34,5 @@ Thumbs.db
 # Colab
 .colab/
 THESIS_PLAN.md
+
+data_processed.zip
