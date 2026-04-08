@@ -7,13 +7,9 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./:/app
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
+      - ./src:/app/src
+      - ./data:/app/data:ro
+      - ./results:/app/results:ro
     restart: unless-stopped
 
   frontend:
@@ -24,11 +20,11 @@ services:
     ports:
       - "5173:5173"
     environment:
-      - CHOKIDAR_USEPOLLING=true
       - VITE_BACKEND_URL=http://backend:8000
     volumes:
-      - ./frontend:/app
-      - /app/node_modules
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./frontend/index.html:/app/index.html
     depends_on:
       backend:
         condition: service_healthy

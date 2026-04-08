@@ -1,0 +1,17 @@
+# API-only dependencies (for Docker backend container)
+# Full ML stack: use requirements.txt
+#
+# PyTorch CPU-only (~140 MB instead of ~2 GB with CUDA)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+
+# Scientific computing (used in api.py)
+numpy>=1.24.0
+scipy>=1.11.0
+scikit-image>=0.22.0
+Pillow>=10.0.0
+
+# Web framework
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+python-multipart>=0.0.6
