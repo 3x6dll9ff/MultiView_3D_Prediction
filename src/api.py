@@ -230,12 +230,17 @@ def predict(filename: str):
     tri_tensor = torch.tensor(multi_view_input, dtype=torch.float32).unsqueeze(0).to(device)
 
     with torch.no_grad():
-        coarse_tensor = model(tri_tensor)
+        coarse_logits = model(tri_tensor)
+        coarse_tensor = torch.sigmoid(coarse_logits)
         coarse_vol = coarse_tensor[0, 0].cpu().numpy()
+        
         pred_tensor = coarse_tensor
         if refiner_model is not None:
             lifted_views = lift_views_to_volume(tri_tensor, model_view_names)
-            pred_tensor = refiner_model(coarse_tensor, lifted_views)
+            # Refiner также возвращает логиты
+            refined_logits = refiner_model(coarse_tensor, lifted_views)
+            pred_tensor = torch.sigmoid(refined_logits)
+            
         pred_vol = pred_tensor[0, 0].cpu().numpy()
         reprojection_l1 = float(torch.abs(project_volume_batch(pred_tensor, model_view_names) - tri_tensor).mean().item())
 
