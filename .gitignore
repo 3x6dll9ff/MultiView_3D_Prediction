@@ -24,6 +24,7 @@ data/raw/
 data/processed/
 data/synthetic/
 *.pt
+!models/*.pt
 *.pth
 *.ckpt
 *.zip
