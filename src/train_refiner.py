@@ -52,7 +52,10 @@ def unwrap_state_dict(checkpoint: dict[str, torch.Tensor] | dict[str, object]) -
 
 
 def infer_latent_dim_from_state_dict(state_dict: dict[str, torch.Tensor]) -> int:
-    return int(state_dict["encoder.fc.1.weight"].shape[0])
+    for key in state_dict.keys():
+        if "encoder.fc" in key and "weight" in key:
+            return int(state_dict[key].shape[0])
+    raise KeyError("Не удалось найти веса encoder.fc в state_dict для определения latent_dim")
 
 
 def build_loader(

@@ -77,7 +77,14 @@ def load_resources():
         checkpoint = torch.load(MODEL_PATH, map_location=device)
         state_dict = unwrap_state_dict(checkpoint)
         model_view_names = infer_view_names(state_dict)
-        latent_dim = int(state_dict["encoder.fc.1.weight"].shape[0])
+        
+        # Автоматический поиск latent_dim
+        latent_dim = 256  # fallback
+        for key in state_dict.keys():
+            if "encoder.fc" in key and "weight" in key:
+                latent_dim = int(state_dict[key].shape[0])
+                break
+                
         model = TriViewAutoencoder(latent_dim=latent_dim, in_channels=len(model_view_names)).to(device)
         model.load_state_dict(state_dict)
         model.eval()
