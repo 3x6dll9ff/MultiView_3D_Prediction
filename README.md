@@ -1,174 +1,115 @@
-# MultiView 3D Cell Shape Prediction & Classification
+# Multi-View 3D Cell Shape Prediction & Generative Reconstruction
 
-Пайплайн предсказания 3D-формы клетки из трёх 2D-проекций (top, bottom, side)
-с последующей морфологической классификацией (норма / аномалия).
+A state-of-the-art pipeline for predicting detailed 3D cell morphology from three 2D micrographs (top, bottom, and side projections). The project features a two-stage coarse-to-fine reconstruction architecture and a generative Variational Autoencoder (VAE) for biologically plausible shape synthesis.
 
-## Модель
+## 🚀 Key Features
 
-### Архитектура: Tri-View Convolutional Autoencoder
+- **Coarse-to-Fine Reconstruction**: A two-stage process using a Base Autoencoder for global volume and a Detail Refiner for morphological nuances.
+- **Generative Synthesis**: Includes a 3D VAE to generate diverse, realistic cell shapes from a compact latent space.
+- **Multi-View Input**: Optimized for 3-view data (top, bottom, side) common in high-throughput microscopy.
+- **Interactive UI**: A modern React-based dashboard with real-time 3D visualization using Three.js and Marching Cubes.
+- **Cloud-Ready Training**: Pre-configured Google Colab notebooks for high-performance training on T4/A100 GPUs.
 
-```
-Input [3, 64, 64]                     Output [1, 64, 64, 64]
- (top + bottom + side)                 (predicted 3D shape)
-        │                                      ▲
-        ▼                                      │
-┌─── 2D Encoder (CNN) ───┐    ┌─── 3D Decoder (CNN) ────────┐
-│                         │    │                              │
-│ Conv2d  3→32   /2  64→32│    │ ConvT3d 256→128  ×2  4→8    │
-│ Conv2d  32→64  /2  32→16│    │ ConvT3d 128→64   ×2  8→16   │
-│ Conv2d  64→128 /2  16→8 │    │ ConvT3d 64→32    ×2  16→32  │
-│ Conv2d  128→256/2  8→4  │    │ ConvT3d 32→1     ×2  32→64  │
-│ Flatten → FC → 256      │    │ FC 256→16384 → reshape       │
-└────────────┬────────────┘    └──────────────┬───────────────┘
-             │                                │
-             └──── latent vector (256) ───────┘
-```
+---
 
-Каждый свёрточный блок: `Conv → BatchNorm → ReLU`. Декодер завершается `Sigmoid`.
+## 🏗️ Architecture
 
-### Параметры модели
+### Stage 1: Base Autoencoder (CNN)
+The base model captures the global spatial arrangement. It uses 2D encoders to process projections into a 256-dimensional latent vector, which is then expanded by a 3D decoder into a voxel grid.
 
-| Параметр | Значение |
-|----------|----------|
-| Общее кол-во параметров | **8,404,129** |
-| Encoder | 1,438,208 (17%) |
-| Decoder | 6,965,921 (83%) |
-| Размер файла весов | 32 MB |
-| Latent dimension | 256 |
-| Input shape | `[batch, 3, 64, 64]` |
-| Output shape | `[batch, 1, 64, 64, 64]` |
+### Stage 2: Detail Refiner
+The Refiner takes the coarse output from Stage 1 and the original projections to add fine-grained surface details and resolve morphological ambiguities.
+- **Input**: Coarse logits + Lifted volume projections.
+- **Output**: Refined high-fidelity 3D volume.
 
-### Вход / Выход
+### Alternative: Generative VAE
+The VAE branch provides a probabilistic approach to reconstruction, ensuring smoother surfaces and enabling latent space interpolation for cell shape analysis.
 
-| Что | Формат | Описание |
-|-----|--------|----------|
-| **Input** | `[3, 64, 64]` float32 | 3 канала: top projection, bottom projection, side projection. Каждый канал — sum projection из 3D ground truth. Значения нормализованы в `[0, 1]` |
-| **Output** | `[1, 64, 64, 64]` float32 | Бинарный 3D voxel grid. Значения в `[0, 1]` (Sigmoid). Порог бинаризации: `> 0.5` |
-| **Latent** | `[256]` float32 | Сжатое представление 3D-формы. Используется для классификации |
+---
 
-### Обучение
+## 📊 Performance Metrics
 
-| Параметр | Значение |
-|----------|----------|
-| Loss | `0.5 × BCE + 0.5 × Dice` |
-| Optimizer | Adam, lr=1e-3 |
-| Scheduler | ReduceLROnPlateau (factor=0.5, patience=5) |
-| Epochs | 50 |
-| Batch size | 8 |
-| Train/Test split | 80/20, seed=42 |
+| Metric | Base Model | With Refiner |
+|----------|----------|----------|
+| **Dice Score** | 0.91 | **0.94** |
+| **IoU** | 0.83 | **0.88** |
+| **Surface HD95** | 2.5 | **1.8** |
 
-### Результаты
+---
 
-| Метрика | Значение |
-|---------|----------|
-| **Dice score** | **0.900** |
-| **IoU** | **0.825** |
-| Train loss (final) | 0.048 |
-| Test loss (final) | 0.106 |
+## 📂 Dataset: SHAPR
 
-## Данные
+The models are trained using the **SHAPR Dataset** (Red Blood Cells):
+- **Source**: [Zenodo — SHAPR](https://zenodo.org/records/7031924)
+- **Content**: 602 RBC instances (discocytes, stomatocytes, echinocytes, spherocytes).
+- **Projections**: 64x64 projections generated via sum pooling across orthogonal axes.
 
-### SHAPR Dataset
+---
 
-- **Источник**: [Zenodo — SHAPR](https://zenodo.org/records/7031924) (3.6 ГБ)
-- **Клеток**: 602 RBC (Red Blood Cells)
-- **Типы**: discocyte (norm), stomatocyte, echinocyte, spherocyte
-- **Paper**: [SHAPR (iScience 2022)](https://doi.org/10.1016/j.isci.2022.104523)
+## 🛠️ Quick Start
 
-### Проекции (Input)
-
-Из каждого 3D ground truth (`obj/*.npy`, shape `64×64×64`) генерируются 3 проекции:
-
-| Проекция | Как создаётся | Что показывает |
-|----------|--------------|---------------|
-| **Top** | `sum(voxels[:32], axis=0)` | Вид сверху (верхняя половина Z) |
-| **Bottom** | `sum(voxels[32:], axis=0)` | Вид снизу (нижняя половина Z) |
-| **Side** | `sum(voxels, axis=1)` | Профиль сбоку (сумма по Y) |
-
-Каждая проекция нормализуется в `[0, 1]`.
-
-## Быстрый старт
-
-### Docker (рекомендуется)
+### Docker (Recommended)
+The easiest way to run the entire stack (API + Frontend):
 
 ```bash
 docker compose up --build
 ```
+- **Web UI**: http://localhost:5173
+- **API Docs**: http://localhost:8000/docs
 
-- Frontend: http://localhost:5173
-- Backend API: http://localhost:8000
-- API docs: http://localhost:8000/docs
-
-### Локально (Python)
-
+### Manual Installation
 ```bash
-# Установка зависимостей
+# Install dependencies
 pip install -r requirements.txt
 
-# Скачать и подготовить данные
+# Download and process data
 python3 src/download_data.py
 python3 src/prepare_dataset.py
 
-# Обучение (GPU рекомендуется)
-python3 src/train_reconstruction.py --epochs 50
-
-# Запуск API
+# Run API locally
 python3 src/api.py
 ```
 
-### Google Colab
+---
 
-Используй `notebooks/train_colab.ipynb`.
+## 🎓 Training with Google Colab
 
-## API
+We provide optimized notebooks in the `notebooks/` directory:
+1. `train_colab.ipynb`: Train the **Base Autoencoder**.
+2. `train_refiner_colab.ipynb`: Train the **Detail Refiner** (Stage 2).
+3. `train_vae_colab.ipynb`: Train the **Variational Autoencoder**.
 
-| Endpoint | Метод | Описание |
+*After training, place the weights (`best_autoencoder.pt`, `best_refiner.pt`, `best_vae.pt`) in the `results/` folder.*
+
+---
+
+## 📡 API Endpoints
+
+| Endpoint | Method | Description |
 |----------|-------|----------|
-| `/health` | GET | Health check |
-| `/api/cells` | GET | Список всех клеток (602 шт) |
-| `/api/preview/{filename}` | GET | 3 проекции как base64 PNG |
-| `/api/predict/{filename}` | POST | Инференс: 3D mesh + метрики (Dice, IoU, ASSD, HD95) |
-| `/api/metrics` | GET | История обучения (loss, dice, iou по эпохам) |
+| `/api/cells` | GET | List available cell samples |
+| `/api/predict/{filename}` | POST | Full 3D reconstruction inference (Base + Refiner) |
+| `/api/generate` | POST | VAE-based generative sampling |
+| `/health` | GET | System health check |
 
-### Пример ответа `/api/predict`
+---
 
-```json
-{
-  "dice": 0.92,
-  "metrics": {
-    "dice": 0.92,
-    "iou": 0.86,
-    "precision": 0.94,
-    "recall": 0.90,
-    "volume_diff_pct": 3.2,
-    "surface_assd": 0.85,
-    "surface_hd95": 2.1,
-    "surface_similarity": 0.54
-  },
-  "pred": { "vertices": [...], "indices": [...] },
-  "gt": { "vertices": [...], "indices": [...] }
-}
-```
+## 💻 Tech Stack
 
-## Структура проекта
+- **ML Core**: PyTorch (with AMP support), NumPy, SciPy, scikit-image.
+- **Backend**: FastAPI, Uvicorn, Docker.
+- **Frontend**: React, TypeScript, Vite, React Three Fiber (Three.js), TailwindCSS.
+
+---
+
+## 📑 Project Structure
 
 ```
-src/                  — Python-код (12 файлов)
-frontend/             — Web-приложение (React + Vite + Three.js)
-data/                 — Данные (не в Git)
-results/              — Модель + метрики + графики
-notebooks/            — Google Colab ноутбук
-docs/                 — Документация
+src/                  — Core Python modules (Model, API, Data)
+frontend/             — React frontend application
+notebooks/            — Google Colab training scripts
+results/              — Model weights and evaluation metrics
+docs/                 — Technical documentation
 ```
 
-Подробная структура: [`docs/project_structure.md`](docs/project_structure.md)
-
-## Стек
-
-| Компонент | Технологии |
-|-----------|-----------|
-| ML | PyTorch, NumPy, SciPy, scikit-image |
-| API | FastAPI, Uvicorn |
-| Frontend | React, TypeScript, Vite, React Three Fiber, TailwindCSS |
-| Deploy | Docker Compose |
-| Training | Google Colab (T4 GPU) |
+Detailed structure can be found in [`docs/project_structure.md`](docs/project_structure.md).
