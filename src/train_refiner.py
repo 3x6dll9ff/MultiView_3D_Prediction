@@ -283,19 +283,11 @@ def train(
 
     refiner = DetailRefiner(view_channels=len(view_names)).to(device)
     optimizer = torch.optim.AdamW(refiner.parameters(), lr=lr, weight_decay=1e-4)
-    warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=0.1, total_iters=warmup_epochs
-    )
-    main_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode="max",
         factor=0.5,
         patience=4,
-    )
-    scheduler = torch.optim.lr_scheduler.SequentialLR(
-        optimizer,
-        schedulers=[warmup_scheduler, main_scheduler],
-        milestones=[warmup_epochs],
     )
     scaler = GradScaler() if device.type == "cuda" else None
     hard_threshold = test_ds.hard_threshold(quantile=0.8)
@@ -327,6 +319,11 @@ def train(
     best_score = -1.0
     patience_counter = 0
     for epoch in range(1, epochs + 1):
+        if epoch <= warmup_epochs:
+            warmup_factor = epoch / warmup_epochs
+            for pg in optimizer.param_groups:
+                pg["lr"] = lr * warmup_factor
+
         start_time = time.time()
         train_metrics = train_one_epoch(
             base_model,

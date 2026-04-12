@@ -265,19 +265,11 @@ def train(
     view_names = train_ds.view_names
     model = TriViewAutoencoder(latent_dim=latent_dim, in_channels=len(view_names), skip_channels=len(view_names)).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=0.1, total_iters=warmup_epochs
-    )
-    main_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode="max",
         factor=0.5,
         patience=4,
-    )
-    scheduler = torch.optim.lr_scheduler.SequentialLR(
-        optimizer,
-        schedulers=[warmup_scheduler, main_scheduler],
-        milestones=[warmup_epochs],
     )
     scaler = GradScaler() if device.type == "cuda" else None
 
@@ -331,6 +323,11 @@ def train(
     }
 
     for epoch in range(1, epochs + 1):
+        if epoch <= warmup_epochs:
+            warmup_factor = epoch / warmup_epochs
+            for pg in optimizer.param_groups:
+                pg["lr"] = lr * warmup_factor
+
         start_time = time.time()
         train_metrics = train_one_epoch(
             model,
