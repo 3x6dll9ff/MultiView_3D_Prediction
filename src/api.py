@@ -55,7 +55,7 @@ def infer_view_names(state_dict):
 
 def infer_latent_dim(state_dict):
     for key in state_dict.keys():
-        if "encoder.fc.1.weight" in key:
+        if "encoder.fc" in key and "weight" in key:
             return int(state_dict[key].shape[0])
     if "fc_mu.weight" in state_dict:
         return int(state_dict["fc_mu.weight"].shape[0])

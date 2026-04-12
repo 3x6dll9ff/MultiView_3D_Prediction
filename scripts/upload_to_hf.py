@@ -76,7 +76,11 @@ if "model_state_dict" in state_dict:
 
 in_channels = infer_in_channels_from_state_dict(state_dict)
 skip_channels = infer_skip_channels_from_state_dict(state_dict)
-latent_dim = int(state_dict["encoder.fc.1.weight"].shape[0])
+latent_dim = 256
+for key in state_dict.keys():
+    if "encoder.fc" in key and "weight" in key:
+        latent_dim = int(state_dict[key].shape[0])
+        break
 
 model = TriViewAutoencoder(latent_dim=latent_dim, in_channels=in_channels, skip_channels=skip_channels)
 model.load_state_dict(state_dict)

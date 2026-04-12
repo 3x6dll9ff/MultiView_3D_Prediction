@@ -44,7 +44,10 @@ def unwrap_state_dict(checkpoint: dict[str, object]) -> dict[str, torch.Tensor]:
 
 
 def infer_latent_dim(state_dict: dict[str, torch.Tensor]) -> int:
-    return int(state_dict["encoder.fc.1.weight"].shape[0])
+    for key in state_dict.keys():
+        if "encoder.fc" in key and "weight" in key:
+            return int(state_dict[key].shape[0])
+    return 256
 
 
 def compute_metrics(pred: torch.Tensor, target: torch.Tensor) -> dict[str, float]:
