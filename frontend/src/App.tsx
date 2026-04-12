@@ -89,11 +89,13 @@ const circleTexture = (() => {
   return new THREE.CanvasTexture(canvas)
 })()
 
-function CellMesh({ vertices, indices, color, baseOpacity }: {
+function CellMesh({ vertices, indices, color, baseOpacity, isOverlay, overlayOpacity }: {
   vertices: number[]
   indices: number[]
   color: string
   baseOpacity?: number
+  isOverlay?: boolean
+  overlayOpacity?: number
 }) {
   const op = baseOpacity ?? 0.18
   const geometry = useMemo(() => {
@@ -121,6 +123,48 @@ function CellMesh({ vertices, indices, color, baseOpacity }: {
   }, [vertices, indices])
 
   if (!geometry) return null
+
+  if (isOverlay) {
+    const ovOp = overlayOpacity ?? 0.6
+    return (
+      <group>
+        <mesh geometry={geometry}>
+          <meshStandardMaterial
+            color={color}
+            transparent
+            opacity={ovOp * 0.5}
+            side={THREE.DoubleSide}
+            roughness={0.4}
+            metalness={0.1}
+            depthWrite={false}
+          />
+        </mesh>
+        <mesh geometry={geometry}>
+          <meshBasicMaterial
+            color={color}
+            wireframe
+            transparent
+            opacity={ovOp * 0.9}
+            blending={THREE.AdditiveBlending}
+            depthWrite={false}
+          />
+        </mesh>
+        <points geometry={geometry}>
+          <pointsMaterial
+            size={0.4}
+            color={color}
+            transparent
+            opacity={ovOp * 0.8}
+            map={circleTexture}
+            alphaMap={circleTexture}
+            alphaTest={0.01}
+            sizeAttenuation
+            depthWrite={false}
+          />
+        </points>
+      </group>
+    )
+  }
 
     return (
     <group>
@@ -162,13 +206,14 @@ function CellMesh({ vertices, indices, color, baseOpacity }: {
   )
 }
 
-function Scene({ meshData, color, label, overlayMesh, overlayColor, overlayOpacity }: {
+function Scene({ meshData, color, label, overlayMesh, overlayColor, overlayOpacity, dimBase }: {
   meshData: { vertices: number[]; indices: number[] } | null
   color: string
   label: string
   overlayMesh?: { vertices: number[]; indices: number[] } | null
   overlayColor?: string
   overlayOpacity?: number
+  dimBase?: boolean
 }) {
   return (
     <div className="scene-container">
@@ -182,14 +227,15 @@ function Scene({ meshData, color, label, overlayMesh, overlayColor, overlayOpaci
         <GridFloor />
         <ScaleBar />
         {meshData && (
-          <CellMesh vertices={meshData.vertices} indices={meshData.indices} color={color} />
+          <CellMesh vertices={meshData.vertices} indices={meshData.indices} color={color} baseOpacity={dimBase ? 0.08 : undefined} />
         )}
         {overlayMesh && overlayColor && (
           <CellMesh
             vertices={overlayMesh.vertices}
             indices={overlayMesh.indices}
             color={overlayColor}
-            baseOpacity={(overlayOpacity ?? 0.5) * 0.18}
+            isOverlay
+            overlayOpacity={overlayOpacity}
           />
         )}
         <SyncedControls />
@@ -401,6 +447,7 @@ function App() {
                       overlayMesh={overlay ? cnnData?.gt : undefined}
                       overlayColor="#ef4444"
                       overlayOpacity={overlayOpacity}
+                      dimBase={overlay}
                     />
                   </div>
                   {vaeData && (
@@ -413,6 +460,7 @@ function App() {
                         overlayMesh={overlay ? cnnData?.gt : undefined}
                         overlayColor="#ef4444"
                         overlayOpacity={overlayOpacity}
+                        dimBase={overlay}
                       />
                     </div>
                   )}
@@ -430,6 +478,7 @@ function App() {
                       overlayMesh={overlay ? cnnData?.pred : undefined}
                       overlayColor="#4fffff"
                       overlayOpacity={overlayOpacity}
+                      dimBase={overlay}
                     />
                   </div>
               </section>
