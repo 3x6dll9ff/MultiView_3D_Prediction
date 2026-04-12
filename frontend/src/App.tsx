@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef, useCallback } from 'react'
 import { Canvas } from '@react-three/fiber'
-import { OrbitControls, Environment } from '@react-three/drei'
+import { OrbitControls } from '@react-three/drei'
 import { useThree, useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
 import axios from 'axios'
@@ -49,6 +49,34 @@ function SyncedControls() {
   )
 }
 
+function GridFloor() {
+  return (
+    <group position={[0, -32, 0]}>
+      <gridHelper args={[80, 20, '#1a1a2e', '#1a1a2e']} />
+      <gridHelper args={[80, 4, '#2a2a3e', '#2a2a3e']} />
+    </group>
+  )
+}
+
+function ScaleBar() {
+  return (
+    <group position={[24, -30, 24]}>
+      <mesh>
+        <boxGeometry args={[20, 0.12, 0.12]} />
+        <meshBasicMaterial color="#4fffff" transparent opacity={0.5} />
+      </mesh>
+      <mesh position={[-10, 0.4, 0]}>
+        <boxGeometry args={[0.12, 0.8, 0.12]} />
+        <meshBasicMaterial color="#4fffff" transparent opacity={0.5} />
+      </mesh>
+      <mesh position={[10, 0.4, 0]}>
+        <boxGeometry args={[0.12, 0.8, 0.12]} />
+        <meshBasicMaterial color="#4fffff" transparent opacity={0.5} />
+      </mesh>
+    </group>
+  )
+}
+
 const circleTexture = (() => {
   const canvas = document.createElement('canvas')
   canvas.width = 64
@@ -58,8 +86,7 @@ const circleTexture = (() => {
   ctx.arc(32, 32, 30, 0, Math.PI * 2)
   ctx.fillStyle = '#ffffff'
   ctx.fill()
-  const tex = new THREE.CanvasTexture(canvas)
-  return tex
+  return new THREE.CanvasTexture(canvas)
 })()
 
 function CellMesh({ vertices, indices, color }: {
@@ -96,12 +123,14 @@ function CellMesh({ vertices, indices, color }: {
   return (
     <group>
       <mesh geometry={geometry}>
-        <meshBasicMaterial
+        <meshStandardMaterial
           color={color}
           transparent
-          opacity={0.06}
+          opacity={0.18}
           side={THREE.DoubleSide}
-          depthWrite={false}
+          roughness={0.6}
+          metalness={0.05}
+          depthWrite={true}
         />
       </mesh>
       <mesh geometry={geometry}>
@@ -109,17 +138,17 @@ function CellMesh({ vertices, indices, color }: {
           color={color}
           wireframe
           transparent
-          opacity={0.08}
+          opacity={0.12}
           blending={THREE.AdditiveBlending}
           depthWrite={false}
         />
       </mesh>
       <points geometry={geometry}>
         <pointsMaterial
-          size={0.25}
+          size={0.3}
           color={color}
           transparent
-          opacity={0.95}
+          opacity={0.9}
           map={circleTexture}
           alphaMap={circleTexture}
           alphaTest={0.01}
@@ -139,12 +168,14 @@ function Scene({ meshData, color, label }: {
   return (
     <div className="scene-container">
       <div className="scene-label">{label}</div>
-      <Canvas camera={{ position: [0, 40, 50], fov: 45 }}>
+      <Canvas camera={{ position: [0, 40, 50], fov: 45 }} gl={{ antialias: true }}>
         <color attach="background" args={['#08080f']} />
-        <ambientLight intensity={0.3} />
-        <pointLight position={[10, 10, 10]} intensity={1.2} color={color} />
-        <pointLight position={[-10, -10, -10]} intensity={0.8} color="#6366f1" />
-        <Environment preset="city" />
+        <ambientLight intensity={0.25} />
+        <directionalLight position={[30, 50, 20]} intensity={1.2} color="#ffffff" />
+        <directionalLight position={[-20, 10, -30]} intensity={0.4} color={color} />
+        <pointLight position={[0, -20, 0]} intensity={0.5} color="#6366f1" />
+        <GridFloor />
+        <ScaleBar />
         {meshData && (
           <CellMesh vertices={meshData.vertices} indices={meshData.indices} color={color} />
         )}
@@ -357,7 +388,7 @@ function App() {
 
             {!hasResults && !loading && (
               <div className="empty-state">
-                Select a cell sample and click <strong>Predict 3D Shape</strong> to begin
+                Select a cell sample and click <strong>Generate</strong> to begin
               </div>
             )}
           </main>
