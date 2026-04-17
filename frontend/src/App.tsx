@@ -89,15 +89,16 @@ const circleTexture = (() => {
   return new THREE.CanvasTexture(canvas)
 })()
 
-function CellMesh({ vertices, indices, color, baseOpacity, isOverlay, overlayOpacity }: {
+function CellMesh({ vertices, indices, color, baseOpacity, isDiffOverlay, vertexColors }: {
   vertices: number[]
   indices: number[]
   color: string
   baseOpacity?: number
-  isOverlay?: boolean
-  overlayOpacity?: number
+  isDiffOverlay?: boolean
+  vertexColors?: number[]
 }) {
   const op = baseOpacity ?? 0.18
+  const hasVColors = !!vertexColors && vertexColors.length > 0
   const geometry = useMemo(() => {
     if (!vertices?.length || !indices?.length) return null
 
@@ -119,56 +120,64 @@ function CellMesh({ vertices, indices, color, baseOpacity, isOverlay, overlayOpa
     geo.setAttribute('position', new THREE.BufferAttribute(verts, 3))
     geo.setIndex(indices)
     geo.computeVertexNormals()
+
+    if (hasVColors) {
+      const colorsArr = new Float32Array(vertexColors!.length)
+      for (let i = 0; i < vertexColors!.length; i++) {
+        colorsArr[i] = vertexColors![i]
+      }
+      geo.setAttribute('color', new THREE.BufferAttribute(colorsArr, 3))
+    }
+
     return geo
-  }, [vertices, indices])
+  }, [vertices, indices, hasVColors, vertexColors])
 
   if (!geometry) return null
 
-  if (isOverlay) {
-    const ovOp = overlayOpacity ?? 0.6
+  if (isDiffOverlay) {
     return (
-      <group>
-        <mesh geometry={geometry}>
+      <group renderOrder={1}>
+        <mesh geometry={geometry} renderOrder={1}>
           <meshStandardMaterial
             color={color}
             transparent
-            opacity={ovOp * 0.5}
+            opacity={0.4}
+            side={THREE.DoubleSide}
+            roughness={0.5}
+            metalness={0.0}
+            emissive={color}
+            emissiveIntensity={0.35}
+            depthTest={true}
+            depthWrite={false}
+          />
+        </mesh>
+      </group>
+    )
+  }
+
+  if (hasVColors) {
+    return (
+      <group renderOrder={0}>
+        <mesh geometry={geometry} renderOrder={0}>
+          <meshStandardMaterial
+            transparent
+            opacity={op}
             side={THREE.DoubleSide}
             roughness={0.4}
-            metalness={0.1}
-            depthWrite={false}
+            metalness={0.0}
+            depthWrite={op > 0.5}
+            vertexColors
+            emissive={'#ffffff'}
+            emissiveIntensity={0.15}
           />
         </mesh>
-        <mesh geometry={geometry}>
-          <meshBasicMaterial
-            color={color}
-            wireframe
-            transparent
-            opacity={ovOp * 0.9}
-            blending={THREE.AdditiveBlending}
-            depthWrite={false}
-          />
-        </mesh>
-        <points geometry={geometry}>
-          <pointsMaterial
-            size={0.4}
-            color={color}
-            transparent
-            opacity={ovOp * 0.8}
-            map={circleTexture}
-            alphaMap={circleTexture}
-            alphaTest={0.01}
-            sizeAttenuation
-            depthWrite={false}
-          />
-        </points>
       </group>
     )
   }
 
     return (
-    <group>
-      <mesh geometry={geometry}>
+    <group renderOrder={0}>
+      <mesh geometry={geometry} renderOrder={0}>
         <meshStandardMaterial
           color={color}
           transparent
@@ -176,10 +185,10 @@ function CellMesh({ vertices, indices, color, baseOpacity, isOverlay, overlayOpa
           side={THREE.DoubleSide}
           roughness={0.6}
           metalness={0.05}
-          depthWrite={true}
+          depthWrite={op > 0.5}
         />
       </mesh>
-      <mesh geometry={geometry}>
+      <mesh geometry={geometry} renderOrder={0}>
         <meshBasicMaterial
           color={color}
           wireframe
@@ -189,7 +198,7 @@ function CellMesh({ vertices, indices, color, baseOpacity, isOverlay, overlayOpa
           depthWrite={false}
         />
       </mesh>
-      <points geometry={geometry}>
+      <points geometry={geometry} renderOrder={0}>
         <pointsMaterial
           size={0.3}
           color={color}
@@ -206,19 +215,19 @@ function CellMesh({ vertices, indices, color, baseOpacity, isOverlay, overlayOpa
   )
 }
 
-function Scene({ meshData, color, label, overlayMesh, overlayColor, overlayOpacity, dimBase }: {
+function Scene({ meshData, color, label, diffMesh, diffActive }: {
   meshData: { vertices: number[]; indices: number[] } | null
   color: string
   label: string
-  overlayMesh?: { vertices: number[]; indices: number[] } | null
-  overlayColor?: string
-  overlayOpacity?: number
-  dimBase?: boolean
+  diffMesh?: { fp_vertex_colors: number[] | null; fn: { vertices: number[]; indices: number[] } | null } | null
+  diffActive?: boolean
 }) {
+  const showDiff = diffActive && diffMesh
+  const meshOpacity = showDiff ? 0.85 : 0.18
   return (
     <div className="scene-container">
       <div className="scene-label">{label}</div>
-      <Canvas camera={{ position: [0, 40, 50], fov: 45 }} gl={{ antialias: true }}>
+      <Canvas camera={{ position: [0, 40, 50], fov: 45 }} gl={{ antialias: true }} onCreated={({ gl }) => { gl.sortObjects = true }}>
         <color attach="background" args={['#08080f']} />
         <ambientLight intensity={0.25} />
         <directionalLight position={[30, 50, 20]} intensity={1.2} color="#ffffff" />
@@ -227,16 +236,16 @@ function Scene({ meshData, color, label, overlayMesh, overlayColor, overlayOpaci
         <GridFloor />
         <ScaleBar />
         {meshData && (
-          <CellMesh vertices={meshData.vertices} indices={meshData.indices} color={color} baseOpacity={dimBase ? 0.08 : undefined} />
-        )}
-        {overlayMesh && overlayColor && (
           <CellMesh
-            vertices={overlayMesh.vertices}
-            indices={overlayMesh.indices}
-            color={overlayColor}
-            isOverlay
-            overlayOpacity={overlayOpacity}
+            vertices={meshData.vertices}
+            indices={meshData.indices}
+            color={color}
+            baseOpacity={meshOpacity}
+            vertexColors={showDiff ? diffMesh?.fp_vertex_colors ?? undefined : undefined}
           />
+        )}
+        {showDiff && diffMesh?.fn && (
+          <CellMesh vertices={diffMesh.fn.vertices} indices={diffMesh.fn.indices} color="#5eead4" isDiffOverlay />
         )}
         <SyncedControls />
       </Canvas>
@@ -340,6 +349,7 @@ function App() {
 
   useEffect(() => {
     if (!selectedCell) return
+    setOverlay(false)
     axios.get(`${API}/api/preview/${selectedCell}`)
       .then(res => setPreview(res.data))
       .catch(console.error)
@@ -427,7 +437,6 @@ function App() {
 
   const hasResults = cnnData || vaeData
   const [overlay, setOverlay] = useState(false)
-  const [overlayOpacity, setOverlayOpacity] = useState(0.6)
 
   return (
     <div className="app">
@@ -497,21 +506,13 @@ function App() {
                       className={`overlay-btn ${overlay ? 'overlay-btn-active' : ''}`}
                       onClick={() => setOverlay(!overlay)}
                     >
-                      Overlay
+                      Diff View
                     </button>
                     {overlay && (
-                      <div className="overlay-slider-wrap">
-                        <span className="overlay-slider-label">GT</span>
-                        <input
-                          type="range"
-                          min="0"
-                          max="1"
-                          step="0.05"
-                          value={overlayOpacity}
-                          onChange={e => setOverlayOpacity(parseFloat(e.target.value))}
-                          className="overlay-slider"
-                        />
-                        <span className="overlay-slider-val">{Math.round(overlayOpacity * 100)}%</span>
+                      <div className="overlay-legend">
+                        <span className="legend-item"><span className="legend-dot" style={{ background: '#d97373' }} />Extra (FP)</span>
+                        <span className="legend-item"><span className="legend-dot" style={{ background: '#5eead4' }} />Missing (FN)</span>
+                        <span className="legend-item"><span className="legend-dot" style={{ background: '#949ea8' }} />Correct</span>
                       </div>
                     )}
                   </div>
@@ -530,12 +531,10 @@ function App() {
                     )}
                     <Scene
                       meshData={cnnData?.pred}
-                      color="#4fffff"
+                      color="#e4e4e7"
                       label="CNN Prediction"
-                      overlayMesh={overlay ? cnnData?.gt : undefined}
-                      overlayColor="#ef4444"
-                      overlayOpacity={overlayOpacity}
-                      dimBase={overlay}
+                      diffMesh={overlay ? cnnData?.diff : undefined}
+                      diffActive={overlay}
                     />
                   </div>
                   {vaeData && (
@@ -543,12 +542,10 @@ function App() {
                       <MetricStrip metrics={buildMetrics(vaeData)} />
                       <Scene
                         meshData={vaeData?.pred}
-                        color="#a0c4ff"
+                        color="#e4e4e7"
                         label="VAE Generation"
-                        overlayMesh={overlay ? cnnData?.gt : undefined}
-                        overlayColor="#ef4444"
-                        overlayOpacity={overlayOpacity}
-                        dimBase={overlay}
+                        diffMesh={overlay ? vaeData?.diff : undefined}
+                        diffActive={overlay}
                       />
                     </div>
                   )}
@@ -561,12 +558,8 @@ function App() {
                     ]} />}
                     <Scene
                       meshData={cnnData?.gt}
-                      color="#a5d8ff"
+                      color="#e4e4e7"
                       label="Ground Truth"
-                      overlayMesh={overlay ? cnnData?.pred : undefined}
-                      overlayColor="#4fffff"
-                      overlayOpacity={overlayOpacity}
-                      dimBase={overlay}
                     />
                   </div>
               </section>

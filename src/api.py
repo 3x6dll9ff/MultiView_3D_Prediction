@@ -242,6 +242,43 @@ def compute_surface_similarity(pred_mesh: dict | None, gt_mesh: dict | None) -> 
     }
 
 
+from scipy.ndimage import binary_dilation, map_coordinates
+
+
+def compute_diff(pred_vol: np.ndarray, gt_vol: np.ndarray, pred_mesh: dict | None) -> dict:
+    pred_b = (pred_vol > 0.5).astype(np.float32)
+    gt_b = (gt_vol > 0.5).astype(np.float32)
+    fn_vol = (gt_b * (1.0 - pred_b)).astype(np.float32)
+
+    fp_vertex_colors = None
+    if pred_mesh is not None:
+        verts = np.array(pred_mesh["vertices"], dtype=np.float32).reshape(-1, 3)
+        n = len(verts)
+        colors = np.ones((n, 3), dtype=np.float32) * [0.58, 0.62, 0.70]
+        gt_coords = verts.T
+        gt_sampled = map_coordinates(gt_b.astype(np.float64), gt_coords, order=1, mode='constant', cval=0.0)
+        for i in range(n):
+            if gt_sampled[i] < 0.5:
+                colors[i] = [0.85, 0.45, 0.45]
+        fp_vertex_colors = colors.flatten().tolist()
+
+    fn_mesh = None
+    if fn_vol.sum() > 0:
+        fn_dilated = binary_dilation(fn_vol, iterations=2).astype(np.float32)
+        fn_smooth = fn_dilated.copy()
+        for _ in range(3):
+            padded = np.pad(fn_smooth, 1, mode='constant')
+            fn_smooth = (
+                padded[:-2, 1:-1, 1:-1] + padded[2:, 1:-1, 1:-1] +
+                padded[1:-1, :-2, 1:-1] + padded[1:-1, 2:, 1:-1] +
+                padded[1:-1, 1:-1, :-2] + padded[1:-1, 1:-1, 2:] +
+                padded[1:-1, 1:-1, 1:-1] * 2
+            ) / 8.0
+        fn_mesh = extract_mesh(fn_smooth, level=0.5)
+
+    return {"fp_vertex_colors": fp_vertex_colors, "fn": fn_mesh}
+
+
 @app.post("/api/predict/{filename}")
 def predict(filename: str):
     if not model:
@@ -272,10 +309,12 @@ def predict(filename: str):
     coarse_mesh = extract_mesh(coarse_vol) if refiner_model is not None else None
 
     gt_mesh = None
+    diff = {}
     gt_path = os.path.join(DATA_DIR, "obj", filename)
     if os.path.exists(gt_path):
         gt_vol = np.load(gt_path)
         gt_mesh = extract_mesh(gt_vol)
+        diff = compute_diff(pred_vol, gt_vol, pred_mesh)
 
     overlap_metrics = {
         "dice": 0.0,
@@ -298,7 +337,8 @@ def predict(filename: str):
         },
         "pred": pred_mesh,
         "coarse": coarse_mesh,
-        "gt": gt_mesh
+        "gt": gt_mesh,
+        "diff": diff,
     }
 
 
@@ -383,6 +423,7 @@ def predict_vae(filename: str):
     pred_mesh = extract_mesh(pred_vol)
 
     gt_mesh = None
+    diff = {}
     gt_path = os.path.join(DATA_DIR, "obj", filename)
     overlap_metrics = {"dice": 0.0, "iou": 0.0, "precision": 0.0, "recall": 0.0, "volume_diff_pct": 0.0}
     surface_metrics = None
@@ -392,12 +433,14 @@ def predict_vae(filename: str):
         gt_mesh = extract_mesh(gt_vol)
         overlap_metrics = compute_overlap_metrics(pred_vol, gt_vol)
         surface_metrics = compute_surface_similarity(pred_mesh, gt_mesh)
+        diff = compute_diff(pred_vol, gt_vol, pred_mesh)
 
     return {
         "dice": overlap_metrics["dice"],
         "metrics": {**overlap_metrics, **(surface_metrics or {}), "reprojection_l1": round(float(best_score.item()), 4)},
         "pred": pred_mesh,
         "gt": gt_mesh,
+        "diff": diff,
     }
 
 
