@@ -26,6 +26,7 @@ from sklearn.model_selection import StratifiedShuffleSplit
 from src.autoencoder import TriViewAutoencoder
 from src.classifier import LatentClassifier, MorphometryRFClassifier
 from src.dataset import CellTriViewDataset
+from src.morphometrics import extract_all_metrics
 from src.reconstruction_utils import infer_in_channels_from_state_dict
 
 
@@ -72,45 +73,25 @@ def train_random_forest(data_dir: str, output_dir: str) -> None:
     with open(os.path.join(output_dir, "metrics", "rf_results.json"), "w") as f:
         json.dump(results, f, indent=2)
 
-    print(f"\nРезультаты: {output_dir}/metrics/rf_results.json")
-
-
-def compute_3d_morphometrics(volume_3d: np.ndarray) -> dict[str, float]:
-    """Вычисляет морфометрические признаки из предсказанного 3D объёма."""
-    vol_bin = (volume_3d > 0.5).astype(np.float32)
-    volume = float(vol_bin.sum())
-
-    from scipy.ndimage import binary_erosion, binary_dilation, distance_transform_edt
+    # Сохраняем модель RF через joblib
     try:
-        from scipy.ndimage import convex_hull_image
+        import joblib
     except ImportError:
-        from skimage.morphology import convex_hull_image
+        import pickle as joblib
+    rf_model_path = os.path.join(output_dir, "best_rf_classifier.pkl")
+    joblib.dump(rf.model, rf_model_path)
+    print(f"RF модель сохранена: {rf_model_path}")
+    print(f"Результаты: {output_dir}/metrics/rf_results.json")
 
-    if volume < 10:
-        return {"volume": volume, "sphericity": 0.0, "convexity": 0.0, "surface_area": 0.0, "compactness": 0.0}
 
-    surface = binary_dilation(vol_bin, iterations=1).astype(np.float32) - binary_erosion(vol_bin, iterations=1).astype(np.float32)
-    surface_area = float(surface.sum())
+# Морфометрические признаки, совпадающие с MorphometryRFClassifier.FEATURE_COLS
+MORPHO_KEYS = ["volume", "sphericity", "convexity", "eccentricity", "surface_roughness"]
 
-    try:
-        hull = convex_hull_image(vol_bin)
-        hull_volume = float(hull.sum())
-        convexity = volume / (hull_volume + 1e-8)
-    except Exception:
-        convexity = 1.0
 
-    dt = distance_transform_edt(vol_bin)
-    max_inradius = float(dt.max())
-    sphericity = (np.pi ** (1 / 3) * (6 * volume) ** (2 / 3)) / (surface_area + 1e-8)
-    compactness = max_inradius ** 3 / (volume + 1e-8)
-
-    return {
-        "volume": volume,
-        "sphericity": float(sphericity),
-        "convexity": float(convexity),
-        "surface_area": surface_area,
-        "compactness": float(compactness),
-    }
+def _extract_morpho_features(vol_3d: np.ndarray) -> list[float]:
+    """Извлекает 5 морфометрических признаков из 3D объёма."""
+    m = extract_all_metrics(vol_3d, threshold=0.5)
+    return [m[k] for k in MORPHO_KEYS]
 
 
 def train_latent_classifier(
@@ -179,8 +160,7 @@ def train_latent_classifier(
             morpho_list = []
             for i in range(target_3d.size(0)):
                 vol = target_3d[i, 0].cpu().numpy()
-                m = compute_3d_morphometrics(vol)
-                morpho_list.append([m["volume"], m["sphericity"], m["convexity"], m["surface_area"], m["compactness"]])
+                morpho_list.append(_extract_morpho_features(vol))
             morpho_tensor = torch.tensor(morpho_list, dtype=torch.float32, device=device)
 
             combined = torch.cat([z, morpho_tensor], dim=1)
@@ -212,8 +192,7 @@ def train_latent_classifier(
                 morpho_list = []
                 for i in range(target_3d.size(0)):
                     vol = target_3d[i, 0].cpu().numpy()
-                    m = compute_3d_morphometrics(vol)
-                    morpho_list.append([m["volume"], m["sphericity"], m["convexity"], m["surface_area"], m["compactness"]])
+                    morpho_list.append(_extract_morpho_features(vol))
                 morpho_tensor = torch.tensor(morpho_list, dtype=torch.float32, device=device)
 
                 combined = torch.cat([z, morpho_tensor], dim=1)
@@ -245,6 +224,18 @@ def train_latent_classifier(
             break
 
     print(f"\nBest test accuracy: {best_acc:.4f}")
+
+    # Сохранение метрик
+    os.makedirs(os.path.join(output_dir, "metrics"), exist_ok=True)
+    with open(os.path.join(output_dir, "metrics", "mlp_results.json"), "w") as f:
+        json.dump({
+            "model": "LatentClassifier_MLP",
+            "latent_dim": latent_dim,
+            "n_morpho_features": n_morpho,
+            "morpho_keys": MORPHO_KEYS,
+            "best_test_accuracy": best_acc,
+        }, f, indent=2)
+    print(f"Метрики: {output_dir}/metrics/mlp_results.json")
 
 
 def main():
