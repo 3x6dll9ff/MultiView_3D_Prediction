@@ -15,7 +15,7 @@ const STAGES: StageDef[] = [
   { id: 2, label: 'Refiner', locked: false },
   { id: 3, label: 'Diffusion', locked: true },
   { id: 4, label: 'Ensemble', locked: true },
-  { id: 5, label: 'Classify', locked: true },
+  { id: 5, label: 'Classify', locked: false },
 ]
 
 const CheckIcon = () => (

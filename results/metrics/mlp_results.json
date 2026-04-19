@@ -1,0 +1,13 @@
+{
+  "model": "LatentClassifier_MLP",
+  "latent_dim": 256,
+  "n_morpho_features": 5,
+  "morpho_keys": [
+    "volume",
+    "sphericity",
+    "convexity",
+    "eccentricity",
+    "surface_roughness"
+  ],
+  "best_test_accuracy": 0.9586776859504132
+}

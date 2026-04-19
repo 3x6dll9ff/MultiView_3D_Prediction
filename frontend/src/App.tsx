@@ -341,10 +341,11 @@ function App() {
   const [tab, setTab] = useState<'predict' | 'metrics'>('predict')
   const [metricsHistory, setMetricsHistory] = useState<any[]>([])
   const [vaeHistory, setVaeHistory] = useState<any[]>([])
+  const [predLog, setPredLog] = useState<any[]>([])
+  const [metricsSub, setMetricsSub] = useState<'generations'|'training'|'compare'>('generations')
+  const [pipelineState, setPipelineState] = useState<number>(0)
   const [vaeRaw, setVaeRaw] = useState<any>(null)
-  const [preview, setPreview] = useState<PreviewMap | null>(null)
-  const [predLog, setPredLog] = useState<PredictionEntry[]>([])
-  const [metricsSub, setMetricsSub] = useState<'generations' | 'training'>('generations')
+  const [preview, setPreview] = useState<any>(null)
 
   useEffect(() => {
     axios.get(`${API}/api/cells`).then(res => {
@@ -416,6 +417,18 @@ function App() {
     setLoading(true)
     setCnnData(null)
     setVaeData(null)
+    setPipelineState(1)
+
+    // Simulate pipeline traversal visually
+    const timer = setInterval(() => {
+      setPipelineState(prev => {
+        if (prev === 1) return 2
+        // Jump from 2 (Refiner) directly to 5 (Classify) since Diffusion/Ensemble are locked for CNN
+        if (prev === 2) return 5
+        return prev
+      })
+    }, 600)
+
     try {
       const cnnPromise = axios.post(`${API}/api/predict/${selectedCell}`)
       const vaePromise = vaeAvailable
@@ -423,6 +436,9 @@ function App() {
         : Promise.resolve(null)
 
       const [cnnRes, vaeRes] = await Promise.all([cnnPromise, vaePromise])
+      clearInterval(timer)
+      setPipelineState(6) // Finished all stages
+
       setCnnData(cnnRes.data)
       if (vaeRes) setVaeData(vaeRes.data)
 
@@ -465,8 +481,11 @@ function App() {
           reprojectionL1: m.reprojection_l1 ?? null,
         }])
       }
-    } catch {
+    } catch (err) {
+      console.error(err)
       alert('Backend error. Is FastAPI running on :8000?')
+      clearInterval(timer)
+      setPipelineState(0)
     } finally {
       setLoading(false)
     }
@@ -482,14 +501,15 @@ function App() {
     { key: 'hd95', label: 'HD95', value: data.metrics?.surface_hd95, unit: 'vox' },
     { key: 'sim', label: 'Surf Sim', value: data.metrics?.surface_similarity },
     { key: 'vol', label: 'Vol Diff', value: data.metrics?.volume_diff_pct, unit: '%' },
+    // Morphometrics in tooltips
+    ...(data.morphology ? [
+      { key: 'm_vol', label: 'Volume', value: data.morphology.volume, unit: 'vx' },
+      { key: 'm_sph', label: 'Sphericity', value: data.morphology.sphericity },
+      { key: 'm_cvx', label: 'Convexity', value: data.morphology.convexity },
+      { key: 'm_ecc', label: 'Eccentricity', value: data.morphology.eccentricity },
+      { key: 'm_rg', label: 'Roughness', value: data.morphology.surface_roughness },
+    ] : [])
   ] : []
-
-  const activeStage = useMemo(() => {
-    if (loading && !cnnData) return 1
-    if (cnnData && loading) return 2
-    if (cnnData) return 3
-    return 0
-  }, [loading, cnnData])
 
   const hasResults = cnnData || vaeData
   const [overlay, setOverlay] = useState(false)
@@ -555,7 +575,7 @@ function App() {
               </div>
 
               <div className="top-block-pipeline">
-                <PipelineTracker activeStage={activeStage} />
+                <PipelineTracker activeStage={pipelineState} />
               </div>
             </section>
 
@@ -563,6 +583,7 @@ function App() {
               <section className={`viewports ${vaeData ? 'viewports-3' : ''}`}>
                   <div className="viewport viewport-enter">
                     {cnnData && <MetricStrip metrics={buildMetrics(cnnData)} />}
+
                     {loading && !cnnData && (
                       <div className="viewport-loading">
                         <div className="spinner" />
@@ -605,6 +626,65 @@ function App() {
                       label="Ground Truth"
                     />
                   </div>
+              </section>
+            )}
+
+            {cnnData?.classification && cnnData?.morphology && (
+              <section className="morpho-dashboard viewport-enter" style={{ animationDelay: '180ms' }}>
+                <div className="morpho-title">Morphological Analysis</div>
+                
+                <div className="morpho-dashboard-body">
+                  <div className={`morpho-prediction-card ${cnnData.classification.class.toLowerCase()}`}>
+                    <div className="morpho-pred-icon">
+                      {cnnData.classification.class === 'Normal' ? (
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+                          <polyline points="22 4 12 14.01 9 11.01"></polyline>
+                        </svg>
+                      ) : (
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                          <circle cx="12" cy="12" r="10"></circle>
+                          <line x1="12" y1="8" x2="12" y2="12"></line>
+                          <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                        </svg>
+                      )}
+                    </div>
+                    <div className="morpho-pred-content">
+                      <div className="morpho-pred-title">{cnnData.classification.class}</div>
+                      <div className="morpho-pred-conf">
+                        Confidence: <strong>{(cnnData.classification.confidence * 100).toFixed(1)}%</strong>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="morpho-factors">
+                    <div className="morpho-factor-card">
+                      <span className="morpho-factor-label">Volume (vx)</span>
+                      <span className="morpho-factor-value">{Number(cnnData.morphology.volume).toFixed(1)}</span>
+                    </div>
+                    <div className="morpho-factor-card">
+                      <span className="morpho-factor-label">Sphericity</span>
+                      <span className="morpho-factor-value">{Number(cnnData.morphology.sphericity).toFixed(3)}</span>
+                    </div>
+                    <div className="morpho-factor-card">
+                      <span className="morpho-factor-label">Convexity</span>
+                      <span className="morpho-factor-value">{Number(cnnData.morphology.convexity).toFixed(3)}</span>
+                    </div>
+                    <div className="morpho-factor-card">
+                      <span className="morpho-factor-label">Eccentricity</span>
+                      <span className="morpho-factor-value">{Number(cnnData.morphology.eccentricity).toFixed(3)}</span>
+                    </div>
+                    <div className="morpho-factor-card">
+                      <span className="morpho-factor-label">Roughness</span>
+                      <span className="morpho-factor-value">{Number(cnnData.morphology.surface_roughness).toFixed(3)}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="morpho-explanation">
+                  Classifier identified this cell as <strong>{cnnData.classification.class}</strong> with <strong>{(cnnData.classification.confidence * 100).toFixed(1)}%</strong> confidence. 
+                  This prediction is based on the multi-layer perceptron (MLP) processing the latent structural representation combined with explicit 3D morphometric features extracted from the generated shape.
+                </div>
               </section>
             )}
 

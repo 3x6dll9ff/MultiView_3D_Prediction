@@ -1,0 +1,13 @@
+{
+  "model": "RandomForest",
+  "train_accuracy": 1.0,
+  "test_accuracy": 0.9338842975206612,
+  "test_auroc": 0.9666112956810631,
+  "feature_importance": {
+    "volume": 0.03143240289442926,
+    "sphericity": 0.18349635575806686,
+    "convexity": 0.2921710968058928,
+    "eccentricity": 0.35678335566532526,
+    "surface_roughness": 0.13611678887628584
+  }
+}

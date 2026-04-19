@@ -11,6 +11,8 @@ from skimage.measure import marching_cubes
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.autoencoder import TriViewAutoencoder
+from src.classifier import LatentClassifier
+from src.morphometrics import extract_all_metrics
 from src.refiner import DetailRefiner
 from src.reconstruction_utils import (
     get_view_names,
@@ -35,10 +37,12 @@ DATA_DIR = "data/processed"
 MODEL_PATH = "results/best_autoencoder.pt"
 VAE_MODEL_PATH = "results/best_vae.pt"
 REFINER_PATH = "results/best_refiner.pt"
+CLASSIFIER_PATH = "results/best_classifier.pt"
 
 model = None
 vae_model = None
 refiner_model = None
+classifier_model = None
 model_view_names = get_view_names("tri")
 vae_view_names = get_view_names("tri")
 device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
@@ -97,7 +101,7 @@ def get_status():
 
 @app.on_event("startup")
 def load_resources():
-    global model, vae_model, refiner_model, model_view_names, vae_view_names
+    global model, vae_model, refiner_model, classifier_model, model_view_names, vae_view_names
     if os.path.exists(MODEL_PATH):
         print(f"Загрузка CNN модели на {device}...")
         checkpoint = torch.load(MODEL_PATH, map_location=device)
@@ -124,6 +128,19 @@ def load_resources():
         print("Refiner модель загружена.")
     else:
         print("ПРЕДУПРЕЖДЕНИЕ: Refiner модель не найдена.")
+
+    if os.path.exists(CLASSIFIER_PATH):
+        print(f"Загрузка Classifier модели на {device}...")
+        try:
+            # Latent (256) + 5 morphometrics = 261
+            classifier_model = LatentClassifier(latent_dim=261).to(device)
+            classifier_model.load_state_dict(torch.load(CLASSIFIER_PATH, map_location=device))
+            classifier_model.eval()
+            print("Classifier модель загружена.")
+        except Exception as e:
+            print(f"Ошибка загрузки Classifier: {e}")
+    else:
+        print("ПРЕДУПРЕЖДЕНИЕ: Classifier модель не найдена.")
 
     if os.path.exists(VAE_MODEL_PATH):
         print(f"Загрузка VAE модели на {device}...")
@@ -305,6 +322,23 @@ def predict(filename: str):
         pred_vol = pred_tensor[0, 0].cpu().numpy()
         reprojection_l1 = float(torch.abs(project_volume_batch(pred_tensor, model_view_names) - tri_tensor).mean().item())
 
+        classification_result = None
+        morphometrics_result = extract_all_metrics(pred_vol, threshold=0.5)
+
+        if classifier_model is not None:
+            z = model.encode(tri_tensor)
+            MORPHO_KEYS = ["volume", "sphericity", "convexity", "eccentricity", "surface_roughness"]
+            morpho_list = [[morphometrics_result[k] for k in MORPHO_KEYS]]
+            morpho_tensor = torch.tensor(morpho_list, dtype=torch.float32, device=device)
+            combined = torch.cat([z, morpho_tensor], dim=1)
+            logits = classifier_model(combined)
+            probs = torch.softmax(logits, dim=1)[0]
+            pred_class = int(logits.argmax(1).item())
+            classification_result = {
+                "class": "Anomaly" if pred_class == 1 else "Normal",
+                "confidence": float(probs[pred_class].item())
+            }
+
     pred_mesh = extract_mesh(pred_vol)
     coarse_mesh = extract_mesh(coarse_vol) if refiner_model is not None else None
 
@@ -335,6 +369,8 @@ def predict(filename: str):
             **(surface_metrics or {}),
             "reprojection_l1": round(reprojection_l1, 4),
         },
+        "morphology": morphometrics_result,
+        "classification": classification_result,
         "pred": pred_mesh,
         "coarse": coarse_mesh,
         "gt": gt_mesh,
