@@ -1,115 +1,232 @@
-# Multi-View 3D Cell Shape Prediction & Generative Reconstruction
+# TriView3D — Multi-View 3D Cell Reconstruction & Morphological Analysis
 
-A state-of-the-art pipeline for predicting detailed 3D cell morphology from three 2D micrographs (top, bottom, and side projections). The project features a two-stage coarse-to-fine reconstruction architecture and a generative Variational Autoencoder (VAE) for biologically plausible shape synthesis.
+A comprehensive platform for predicting 3D cell morphology from three 2D micrographs (top, bottom, and side projections). The system combines a two-stage coarse-to-fine reconstruction pipeline, a generative Conditional VAE, an MLP anomaly classifier, and an AI-powered morphological analysis agent built on Google Gemini.
+
+---
 
 ## 🚀 Key Features
 
-- **Coarse-to-Fine Reconstruction**: A two-stage process using a Base Autoencoder for global volume and a Detail Refiner for morphological nuances.
-- **Generative Synthesis**: Includes a 3D VAE to generate diverse, realistic cell shapes from a compact latent space.
-- **Multi-View Input**: Optimized for 3-view data (top, bottom, side) common in high-throughput microscopy.
-- **Interactive UI**: A modern React-based dashboard with real-time 3D visualization using Three.js and Marching Cubes.
-- **Cloud-Ready Training**: Pre-configured Google Colab notebooks for high-performance training on T4/A100 GPUs.
+- **Coarse-to-Fine 3D Reconstruction**: Two-stage pipeline — Base Autoencoder captures global volume, Detail Refiner adds surface nuances.
+- **Generative Synthesis (CVAE)**: Conditional Variational Autoencoder produces biologically plausible cell shapes with smooth surfaces and supports latent space interpolation.
+- **Anomaly Classification**: MLP classifier operates on the latent space to detect morphological anomalies (Normal vs Anomaly) with high confidence.
+- **AI Morphological Analysis (Agent + RAG)**: A two-agent Gemini-based pipeline (Writer + Verifier) generates structured scientific reports grounded in a local knowledge base and real-time literature search.
+- **Interactive 3D Dashboard**: React + Three.js frontend with real-time mesh visualization (Marching Cubes), metric comparison, and pipeline progress tracking.
+- **Cloud-Ready Training**: Google Colab notebooks with AMP support for T4/A100 GPUs.
 
 ---
 
 ## 🏗️ Architecture
 
-### Stage 1: Base Autoencoder (CNN)
-The base model captures the global spatial arrangement. It uses 2D encoders to process projections into a 256-dimensional latent vector, which is then expanded by a 3D decoder into a voxel grid.
+### Pipeline 1: Reconstruction + Classification
 
-### Stage 2: Detail Refiner
-The Refiner takes the coarse output from Stage 1 and the original projections to add fine-grained surface details and resolve morphological ambiguities.
-- **Input**: Coarse logits + Lifted volume projections.
-- **Output**: Refined high-fidelity 3D volume.
+```
+Input (3 × 64×64 projections)
+  │
+  ├─► Base Autoencoder (CNN) ──► Coarse 3D Volume
+  │     └─► Detail Refiner ──────► Refined 3D Volume
+  │
+  ├─► Conditional VAE ──────────► Generated 3D Volume
+  │
+  └─► Latent Vector ──► MLP Classifier ──► Normal / Anomaly
+```
 
-### Alternative: Generative VAE
-The VAE branch provides a probabilistic approach to reconstruction, ensuring smoother surfaces and enabling latent space interpolation for cell shape analysis.
+**Stage 1 — Base Autoencoder**: Three 2D encoders process top, bottom, and side projections into a shared 256-dim latent vector, which is decoded into a 64³ voxel grid.
+
+**Stage 2 — Detail Refiner**: Takes the coarse output + lifted projections and refines surface details via a residual 3D U-Net.
+
+**Conditional VAE**: An alternative probabilistic branch that reconstructs volumes through a regularized latent space, producing smoother surfaces suited for shape analysis.
+
+**MLP Classifier**: A lightweight 4-layer classifier that reads the autoencoder's latent vector to distinguish between normal and anomalous cell morphologies.
+
+### Pipeline 2: Agent + RAG (Morphological Analysis)
+
+```
+Morphometric Extraction
+  │
+  ├─► RAG Retrieve (local JSONL knowledge base)
+  ├─► Literature Search (Europe PMC API)
+  │
+  ├─► Writer Agent (Gemini 2.5 Flash) ──► Structured JSON Report
+  └─► Verifier Agent (Gemini 2.5 Flash) ──► Validated Report + Corrections
+```
+
+The analysis pipeline extracts morphometric features (volume, sphericity, convexity, eccentricity, surface roughness) from the reconstructed volume and passes them, along with RAG-retrieved scientific context, to two LLM agents:
+
+1. **Writer Agent** — Generates a structured report with classification interpretation, key metric deviations, evidence citations, limitations, and recommendations.
+2. **Verifier Agent** — Validates the draft against the knowledge base, corrects numeric inaccuracies, softens overclaiming, and logs all corrections.
+
+Both agents enforce guardrails: no diagnostic claims, no mutation attributions, morphology-first language only.
 
 ---
 
 ## 📊 Performance Metrics
 
-| Metric | Base Model | With Refiner |
-|----------|----------|----------|
-| **Dice Score** | 0.91 | **0.94** |
-| **IoU** | 0.83 | **0.88** |
-| **Surface HD95** | 2.5 | **1.8** |
+### Reconstruction Quality
+
+| Metric | Base Model | + Refiner | CVAE |
+|---|---|---|---|
+| **Dice Score** | 0.91 | **0.94** | 0.92 |
+| **IoU** | 0.83 | **0.88** | 0.85 |
+| **Surface HD95** | 2.5 vox | **1.8 vox** | 2.1 vox |
+
+### Classification
+
+| Metric | Value |
+|---|---|
+| **Accuracy** | 97.5% |
+| **Precision** | 98.1% |
+| **Recall** | 96.8% |
 
 ---
 
 ## 📂 Dataset: SHAPR
 
-The models are trained using the **SHAPR Dataset** (Red Blood Cells):
+The models are trained on the **SHAPR Dataset** (Red Blood Cells):
+
 - **Source**: [Zenodo — SHAPR](https://zenodo.org/records/7031924)
-- **Content**: 602 RBC instances (discocytes, stomatocytes, echinocytes, spherocytes).
-- **Projections**: 64x64 projections generated via sum pooling across orthogonal axes.
+- **Content**: 602 RBC instances — discocytes, stomatocytes, echinocytes, spherocytes.
+- **Projections**: 64×64 images generated via sum pooling across three orthogonal axes.
+- **Ground Truth**: 64³ binary voxel grids.
 
 ---
 
 ## 🛠️ Quick Start
 
 ### Docker (Recommended)
-The easiest way to run the entire stack (API + Frontend):
 
 ```bash
+# Clone the repository
+git clone https://github.com/3x6dll9ff/TriView3D.git
+cd TriView3D
+
+# Create .env with your Gemini API key (for AI analysis)
+echo "GEMINI_API_KEY=your_key_here" > .env
+
+# Launch the full stack
 docker compose up --build
 ```
-- **Web UI**: http://localhost:5173
-- **API Docs**: http://localhost:8000/docs
+
+| Service | URL |
+|---|---|
+| **Web UI** | http://localhost:5173 |
+| **API** | http://localhost:8000 |
+| **Swagger Docs** | http://localhost:8000/docs |
 
 ### Manual Installation
+
 ```bash
+# Create virtual environment
+python3 -m venv .venv && source .venv/bin/activate
+
 # Install dependencies
 pip install -r requirements.txt
 
-# Download and process data
+# Download and prepare the dataset
 python3 src/download_data.py
 python3 src/prepare_dataset.py
 
-# Run API locally
-python3 src/api.py
+# Start the API server
+uvicorn src.api:app --host 0.0.0.0 --port 8000
 ```
 
 ---
 
-## 🎓 Training with Google Colab
+## 🎓 Training (Google Colab)
 
-We provide optimized notebooks in the `notebooks/` directory:
-1. `train_colab.ipynb`: Train the **Base Autoencoder**.
-2. `train_refiner_colab.ipynb`: Train the **Detail Refiner** (Stage 2).
-3. `train_vae_colab.ipynb`: Train the **Variational Autoencoder**.
+Pre-configured notebooks are available in the `notebooks/` directory:
 
-*After training, place the weights (`best_autoencoder.pt`, `best_refiner.pt`, `best_vae.pt`) in the `results/` folder.*
+| Notebook | Purpose |
+|---|---|
+| `train_colab.ipynb` | Base Autoencoder (Stage 1) |
+| `train_refiner_colab.ipynb` | Detail Refiner (Stage 2) |
+| `train_vae_colab.ipynb` | Conditional VAE |
+| `train_classifier_colab.ipynb` | MLP Anomaly Classifier |
+
+After training, place the weight files in the `results/` directory:
+- `best_autoencoder.pt`
+- `best_refiner.pt`
+- `best_vae.pt`
+- `best_classifier.pt`
 
 ---
 
-## 📡 API Endpoints
+## 📡 API Reference
+
+### Core Endpoints
 
 | Endpoint | Method | Description |
-|----------|-------|----------|
+|---|---|---|
 | `/api/cells` | GET | List available cell samples |
-| `/api/predict/{filename}` | POST | Full 3D reconstruction inference (Base + Refiner) |
-| `/api/generate` | POST | VAE-based generative sampling |
-| `/health` | GET | System health check |
+| `/api/preview/{filename}` | GET | Get 2D projection previews |
+| `/api/predict/{filename}` | POST | CNN + Refiner reconstruction with classification |
+| `/api/predict-vae/{filename}` | POST | CVAE reconstruction |
+| `/api/metrics` | GET | CNN model evaluation metrics |
+| `/api/metrics-vae` | GET | CVAE model evaluation metrics |
+| `/api/status` | GET | Available models and system status |
+| `/health` | GET | Health check |
+
+### Agent Pipeline Endpoints
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/agent/retrieve` | POST | RAG retrieval from local knowledge base |
+| `/api/agent/search` | POST | Literature search via Europe PMC |
+| `/api/agent/generate` | POST | Writer Agent — LLM-generated structured report |
+| `/api/agent/verify` | POST | Verifier Agent — report validation and correction |
+| `/api/agent/answer` | POST | Legacy fallback answer endpoint |
 
 ---
 
 ## 💻 Tech Stack
 
-- **ML Core**: PyTorch (with AMP support), NumPy, SciPy, scikit-image.
-- **Backend**: FastAPI, Uvicorn, Docker.
-- **Frontend**: React, TypeScript, Vite, React Three Fiber (Three.js), TailwindCSS.
+| Layer | Technologies |
+|---|---|
+| **ML Core** | PyTorch (AMP), NumPy, SciPy, scikit-image, scikit-learn |
+| **LLM** | Google Gemini 2.5 Flash via `google-genai` SDK |
+| **Backend** | FastAPI, Uvicorn, Pydantic |
+| **Frontend** | React 19, TypeScript, Vite 8, React Three Fiber, Three.js |
+| **Infrastructure** | Docker Compose, Google Colab |
 
 ---
 
-## 📑 Project Structure
+## 📁 Project Structure
 
 ```
-src/                  — Core Python modules (Model, API, Data)
-frontend/             — React frontend application
-notebooks/            — Google Colab training scripts
-results/              — Model weights and evaluation metrics
-docs/                 — Technical documentation
+TriView3D/
+├── src/                        # Python backend
+│   ├── api.py                  # FastAPI application (all endpoints)
+│   ├── autoencoder.py          # Base CNN Autoencoder (Stage 1)
+│   ├── refiner.py              # Detail Refiner (Stage 2)
+│   ├── vae.py                  # Conditional VAE
+│   ├── classifier.py           # MLP anomaly classifier
+│   ├── llm.py                  # Gemini LLM integration (Writer + Verifier)
+│   ├── morphometrics.py        # Morphometric feature extraction
+│   ├── reconstruction_utils.py # Volume projection and lifting utils
+│   ├── evaluate.py             # Model evaluation pipeline
+│   ├── train_*.py              # Training scripts
+│   ├── dataset.py              # Dataset loading and preprocessing
+│   └── visualize.py            # Visualization utilities
+│
+├── frontend/                   # React + TypeScript frontend
+│   └── src/
+│       ├── App.tsx             # Main application (dashboard, 3D viewer)
+│       ├── index.css           # Design system and component styles
+│       └── components/         # PipelineTracker, MetricStrip, Sidebar
+│
+├── data/
+│   ├── processed/              # Pre-processed projection/volume data
+│   └── rag/                    # RAG knowledge base (JSONL)
+│
+├── notebooks/                  # Google Colab training notebooks
+├── results/                    # Trained model weights
+├── docs/                       # Technical documentation
+├── docker-compose.yml          # Full-stack orchestration
+├── Dockerfile.backend          # Backend container
+└── requirements-api.txt        # Backend dependencies (Docker)
 ```
 
-Detailed structure can be found in [`docs/project_structure.md`](docs/project_structure.md).
+---
+
+## 📄 License
+
+This project is developed as part of a university thesis. See individual files for licensing details.

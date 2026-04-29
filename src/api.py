@@ -8,7 +8,7 @@ from urllib.request import urlopen
 
 import numpy as np
 import torch
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from scipy.spatial import cKDTree
@@ -788,6 +788,69 @@ def get_vae_metrics():
         except Exception as e:
             return {"error": str(e)}
     return {"error": "VAE history file not found."}
+
+
+@app.post("/api/generate-custom")
+async def generate_custom(
+    top: UploadFile = File(...),
+    bottom: UploadFile = File(...),
+    side: UploadFile = File(...)
+):
+    """
+    Генерирует 3D модель по трем загруженным фотографиям.
+    Поддерживает и CNN, и CVAE реконструкцию.
+    """
+    if not model:
+        raise HTTPException(status_code=500, detail="CNN модель не загружена.")
+
+    import io
+    from PIL import Image
+
+    async def process_image(file: UploadFile):
+        content = await file.read()
+        img = Image.open(io.BytesIO(content)).convert("L")
+        img = img.resize((64, 64))
+        arr = np.array(img, dtype=np.float32) / 255.0
+        return arr
+
+    try:
+        top_arr = await process_image(top)
+        bottom_arr = await process_image(bottom)
+        side_arr = await process_image(side)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Ошибка обработки изображений: {e}")
+
+    # Собираем тензор [1, 3, 64, 64]
+    input_arr = np.stack([top_arr, bottom_arr, side_arr], axis=0)
+    tri_tensor = torch.tensor(input_arr, dtype=torch.float32).unsqueeze(0).to(device)
+
+    # 1. CNN + Refiner Prediction
+    cnn_mesh = None
+    with torch.no_grad():
+        coarse_logits = tta_predict(model, tri_tensor)
+        if refiner_model is not None:
+            lifted_views = lift_views_to_volume(tri_tensor, model_view_names)
+            refined_logits = refiner_model(coarse_logits, lifted_views)
+            pred_tensor = torch.sigmoid(refined_logits)
+        else:
+            pred_tensor = torch.sigmoid(coarse_logits)
+        
+        pred_vol = pred_tensor[0, 0].cpu().numpy()
+        cnn_mesh = extract_mesh(pred_vol)
+
+    # 2. CVAE Prediction
+    vae_mesh = None
+    if vae_model is not None:
+        with torch.no_grad():
+            from src.vae import best_of_k_generate
+            pred_logits, _ = best_of_k_generate(vae_model, tri_tensor, vae_view_names, num_samples=8)
+            out_vol = torch.sigmoid(pred_logits)[0, 0].cpu().numpy()
+            vae_mesh = extract_mesh(out_vol)
+
+    return {
+        "cnn_mesh": cnn_mesh,
+        "vae_mesh": vae_mesh
+    }
 
 
 if __name__ == "__main__":

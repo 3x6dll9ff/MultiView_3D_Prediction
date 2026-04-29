@@ -8,6 +8,7 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, Responsi
 import Sidebar from './components/Sidebar'
 import MetricStrip from './components/MetricStrip'
 import PipelineTracker from './components/PipelineTracker'
+import CustomGenerator from './components/CustomGenerator'
 import './index.css'
 
 const sharedCamera = {
@@ -47,6 +48,60 @@ function SyncedControls() {
       makeDefault
     />
   )
+}
+
+function LocalControls({ target }: { target: THREE.Vector3 }) {
+  return (
+    <OrbitControls
+      target={target}
+      enablePan={true}
+      enableZoom={true}
+      enableRotate={true}
+      enableDamping={true}
+      dampingFactor={0.05}
+      makeDefault
+    />
+  )
+}
+
+function meshBounds(meshData: { vertices: number[]; indices: number[] } | null) {
+  if (!meshData?.vertices?.length) {
+    return { center: new THREE.Vector3(0, 0, 0), radius: 32 }
+  }
+
+  const box = new THREE.Box3()
+  for (let i = 0; i < meshData.vertices.length; i += 3) {
+    box.expandByPoint(new THREE.Vector3(
+      meshData.vertices[i + 2] - 32,
+      32 - meshData.vertices[i],
+      meshData.vertices[i + 1] - 32,
+    ))
+  }
+
+  const center = new THREE.Vector3()
+  const sphere = new THREE.Sphere()
+  box.getCenter(center)
+  box.getBoundingSphere(sphere)
+  return { center, radius: Math.max(sphere.radius, 8) }
+}
+
+function AutoFitCamera({ center, radius }: { center: THREE.Vector3; radius: number }) {
+  const { camera } = useThree()
+
+  useEffect(() => {
+    const perspective = camera as THREE.PerspectiveCamera
+    const fov = THREE.MathUtils.degToRad(perspective.fov)
+    const distance = Math.max(radius / Math.sin(fov / 2), 26) * 0.82
+    const direction = new THREE.Vector3(0.38, 0.56, 0.74).normalize()
+
+    perspective.position.copy(center).add(direction.multiplyScalar(distance))
+    perspective.near = Math.max(0.1, distance / 100)
+    perspective.far = distance * 10
+    perspective.lookAt(center)
+    perspective.updateProjectionMatrix()
+  }, [camera, center, radius])
+
+  return null
 }
 
 function GridFloor() {
@@ -248,7 +303,7 @@ function CellMesh({ vertices, indices, color, baseOpacity, isDiffOverlay, vertex
   )
 }
 
-function Scene({ meshData, color, label, diffMesh, diffActive, overlay, onToggleOverlay }: {
+export function Scene({ meshData, color, label, diffMesh, diffActive, overlay, onToggleOverlay, syncedControls = true, fitCamera = false }: {
   meshData: { vertices: number[]; indices: number[] } | null
   color: string
   label: string
@@ -256,9 +311,12 @@ function Scene({ meshData, color, label, diffMesh, diffActive, overlay, onToggle
   diffActive?: boolean
   overlay?: boolean
   onToggleOverlay?: () => void
+  syncedControls?: boolean
+  fitCamera?: boolean
 }) {
   const showDiff = diffActive && diffMesh
   const meshOpacity = showDiff ? 0.85 : 0.22
+  const bounds = useMemo(() => meshBounds(meshData), [meshData])
   return (
     <div className="scene-container">
       <div className="scene-label">{label}</div>
@@ -286,6 +344,7 @@ function Scene({ meshData, color, label, diffMesh, diffActive, overlay, onToggle
       )}
       <Canvas camera={{ position: [0, 40, 50], fov: 45 }} gl={{ antialias: true }} onCreated={({ gl }) => { gl.sortObjects = true }}>
         <color attach="background" args={['#0a0a12']} />
+        {fitCamera && <AutoFitCamera center={bounds.center} radius={bounds.radius} />}
         <ambientLight intensity={0.3} />
         <directionalLight position={[30, 50, 20]} intensity={1.0} color="#f0f0f5" />
         <directionalLight position={[-20, 30, -20]} intensity={0.35} color="#c8d0e0" />
@@ -303,7 +362,7 @@ function Scene({ meshData, color, label, diffMesh, diffActive, overlay, onToggle
         {showDiff && diffMesh?.fn && (
           <CellMesh vertices={diffMesh.fn.vertices} indices={diffMesh.fn.indices} color="#5eead4" isDiffOverlay />
         )}
-        <SyncedControls />
+        {syncedControls ? <SyncedControls /> : <LocalControls target={bounds.center} />}
       </Canvas>
     </div>
   )
@@ -428,7 +487,7 @@ function App() {
   const [vaeData, setVaeData] = useState<any>(null)
   const [loading, setLoading] = useState(false)
   const [vaeAvailable, setVaeAvailable] = useState(false)
-  const [tab, setTab] = useState<'predict' | 'metrics'>('predict')
+  const [tab, setTab] = useState<'predict' | 'metrics' | 'generator'>('predict')
   const [metricsHistory, setMetricsHistory] = useState<any[]>([])
   const [vaeHistory, setVaeHistory] = useState<any[]>([])
   const [predLog, setPredLog] = useState<any[]>([])
@@ -1040,6 +1099,12 @@ function App() {
                 Select a cell sample and click <strong>Generate</strong> to begin
               </div>
             )}
+          </main>
+        )}
+
+        {tab === 'generator' && (
+          <main className="content" style={{ padding: 0 }}>
+            <CustomGenerator vaeAvailable={vaeAvailable} />
           </main>
         )}
 

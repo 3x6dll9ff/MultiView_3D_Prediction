@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react'
 
 interface SidebarProps {
-  tab: 'predict' | 'metrics'
-  onTabChange: (tab: 'predict' | 'metrics') => void
+  tab: 'predict' | 'metrics' | 'generator'
+  onTabChange: (tab: 'predict' | 'metrics' | 'generator') => void
   vaeAvailable: boolean
 }
 
@@ -19,6 +19,14 @@ const ChartIcon = () => (
     <line x1="18" y1="20" x2="18" y2="10" />
     <line x1="12" y1="20" x2="12" y2="4" />
     <line x1="6" y1="20" x2="6" y2="14" />
+  </svg>
+)
+
+const UploadIcon = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+    <polyline points="17 8 12 3 7 8" />
+    <line x1="12" y1="3" x2="12" y2="15" />
   </svg>
 )
 
@@ -73,6 +81,15 @@ export default function Sidebar({ tab, onTabChange, vaeAvailable }: SidebarProps
         >
           <span className="sidebar-item-icon"><CubeIcon /></span>
           <span className="sidebar-item-label">Predictor</span>
+        </button>
+
+        <button
+          className={`sidebar-item ${tab === 'generator' ? 'active' : ''}`}
+          onClick={() => onTabChange('generator')}
+          title="Custom Generator"
+        >
+          <span className="sidebar-item-icon"><UploadIcon /></span>
+          <span className="sidebar-item-label">Generator</span>
         </button>
 
         <button
