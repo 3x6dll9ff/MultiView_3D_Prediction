@@ -1,10 +1,16 @@
+import json
 import os
 import sys
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote_plus
+from urllib.request import urlopen
 
 import numpy as np
 import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from scipy.spatial import cKDTree
 from skimage.measure import marching_cubes
 
@@ -14,6 +20,7 @@ from src.autoencoder import TriViewAutoencoder
 from src.classifier import LatentClassifier
 from src.morphometrics import extract_all_metrics
 from src.refiner import DetailRefiner
+from src.llm import generate_report, verify_report, is_available as llm_available
 from src.reconstruction_utils import (
     get_view_names,
     infer_in_channels_from_state_dict,
@@ -38,6 +45,9 @@ MODEL_PATH = "results/best_autoencoder.pt"
 VAE_MODEL_PATH = "results/best_vae.pt"
 REFINER_PATH = "results/best_refiner.pt"
 CLASSIFIER_PATH = "results/best_classifier.pt"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+RAG_PATH = PROJECT_ROOT / "data" / "rag" / "morphology_sources.jsonl"
+RAG_DISCOVERED_PATH = PROJECT_ROOT / "data" / "rag" / "morphology_discovered.jsonl"
 
 model = None
 vae_model = None
@@ -46,6 +56,194 @@ classifier_model = None
 model_view_names = get_view_names("tri")
 vae_view_names = get_view_names("tri")
 device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+
+
+class AgentRequest(BaseModel):
+    filename: str
+    classification: dict[str, Any] | None = None
+    morphology: dict[str, float] | None = None
+    metrics: dict[str, float] | None = None
+    cell_type: str | None = None
+    missing_topics: list[str] | None = None
+    retrieved: list[dict[str, Any]] | None = None
+    discovered: list[dict[str, Any]] | None = None
+    draft_report: dict[str, Any] | None = None
+
+
+def load_jsonl_records(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as file:
+        for line in file:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return records
+
+
+def append_jsonl_record(path: Path, record: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(record, ensure_ascii=True) + "\n")
+
+
+def morphology_topics(morphology: dict[str, float] | None, classification: dict[str, Any] | None) -> list[str]:
+    topics: list[str] = []
+    morphology = morphology or {}
+    if classification and str(classification.get("class", "")).lower() == "anomaly":
+        topics.extend(["morphology_based_anomaly", "limitations"])
+    if float(morphology.get("surface_roughness", 0.0)) >= 0.11:
+        topics.append("surface_roughness")
+    if float(morphology.get("convexity", 1.0)) <= 0.965:
+        topics.append("convexity")
+        topics.append("irregular_shape")
+    if float(morphology.get("sphericity", 1.0)) <= 0.84:
+        topics.append("sphericity")
+    if float(morphology.get("eccentricity", 0.0)) >= 0.68:
+        topics.append("eccentricity")
+        topics.append("asymmetry")
+    if float(morphology.get("volume", 0.0)) >= 18000:
+        topics.append("biological_implications")
+    return list(dict.fromkeys(topics))
+
+
+def retrieve_local_rag(topics: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
+    records = load_jsonl_records(RAG_PATH) + load_jsonl_records(RAG_DISCOVERED_PATH)
+    if not records:
+        return [], topics
+
+    scored: list[tuple[int, int, dict[str, Any]]] = []
+    for record in records:
+        record_topics = set(record.get("topics", []))
+        overlap = len(record_topics.intersection(topics))
+        if overlap == 0:
+            continue
+        priority_bonus = 2 if record.get("priority") == "high" else 1
+        scored.append((overlap, priority_bonus, record))
+
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    selected = [item[2] for item in scored[:5]]
+    covered: set[str] = set()
+    for record in selected:
+        covered.update(set(record.get("topics", [])).intersection(topics))
+    missing = [topic for topic in topics if topic not in covered]
+    return selected, missing
+
+
+TOPIC_SEARCH_QUERIES = {
+    "surface_roughness": 'cell morphology surface roughness cancer review',
+    "convexity": 'cell shape convexity solidity morphology review',
+    "irregular_shape": 'irregular cell shape morphology atypia review',
+    "sphericity": 'cell sphericity morphology abnormality review',
+    "eccentricity": 'cell eccentricity morphology review',
+    "asymmetry": 'cell asymmetry morphology review',
+    "morphology_based_anomaly": 'cell morphology atypia abnormal morphology review',
+    "limitations": 'cell morphology alone limitations molecular follow up review',
+    "biological_implications": 'cell morphology abnormality biological implications review',
+}
+
+
+def search_europe_pmc(topic: str) -> dict[str, Any] | None:
+    query = TOPIC_SEARCH_QUERIES.get(topic)
+    if not query:
+        return None
+    url = (
+        "https://www.ebi.ac.uk/europepmc/webservices/rest/search?query="
+        f"{quote_plus(query)}&format=json&pageSize=1&resultType=core"
+    )
+    try:
+        with urlopen(url, timeout=15) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+
+    results = payload.get("resultList", {}).get("result", [])
+    if not results:
+        return None
+    result = results[0]
+    pmid = result.get("pmid")
+    source_id = f"discovered_{topic}_{pmid or result.get('id', 'na')}"
+    abstract = (result.get("abstractText") or "").strip()
+    if not abstract:
+        abstract = f"Relevant literature was found for {topic.replace('_', ' ')} but the abstract text was unavailable in the response."
+    fulltext_urls = result.get("fullTextUrlList", {}).get("fullTextUrl", [])
+    first_url = fulltext_urls[0].get("url") if fulltext_urls else ""
+    doi_url = f"https://doi.org/{result.get('doi')}" if result.get("doi") else ""
+    pubmed_url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else ""
+    record = {
+        "id": source_id,
+        "source_id": source_id,
+        "title": result.get("title", f"Literature for {topic}"),
+        "source_type": "Europe PMC",
+        "url": first_url or doi_url or pubmed_url,
+        "priority": "medium",
+        "topics": [topic],
+        "chunk_type": "discovered_literature",
+        "content": abstract[:900],
+        "limitations": "This record was auto-discovered at runtime and should be treated as supporting evidence until manually curated.",
+        "follow_up": "Use as fallback grounding when the local RAG base lacks topic coverage.",
+    }
+    return record
+
+
+def sync_discovered_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    existing = {record.get("id") for record in load_jsonl_records(RAG_DISCOVERED_PATH)}
+    synced: list[dict[str, Any]] = []
+    for record in records:
+        if record.get("id") in existing:
+            continue
+        append_jsonl_record(RAG_DISCOVERED_PATH, record)
+        existing.add(record.get("id"))
+        synced.append(record)
+    return synced
+
+
+def build_grounded_explanation(
+    classification: dict[str, Any] | None,
+    morphology: dict[str, float] | None,
+    retrieved: list[dict[str, Any]],
+    discovered: list[dict[str, Any]],
+) -> str:
+    classification = classification or {}
+    morphology = morphology or {}
+    cls = str(classification.get("class", "Unknown"))
+    confidence = float(classification.get("confidence", 0.0))
+    cues: list[str] = []
+    if float(morphology.get("sphericity", 1.0)) <= 0.84:
+        cues.append("reduced spherical regularity")
+    if float(morphology.get("convexity", 1.0)) <= 0.965:
+        cues.append("loss of a smooth convex envelope")
+    if float(morphology.get("eccentricity", 0.0)) >= 0.68:
+        cues.append("pronounced elongation and asymmetry")
+    if float(morphology.get("surface_roughness", 0.0)) >= 0.11:
+        cues.append("elevated surface roughness")
+    if float(morphology.get("volume", 0.0)) >= 18000:
+        cues.append("increased reconstructed volume")
+    cue_text = ", ".join(cues[:-1]) + (" and " + cues[-1] if len(cues) > 1 else cues[0]) if cues else "the combined latent and morphometric signature"
+    local_titles = [record.get("title", "") for record in retrieved[:2] if record.get("title")]
+    discovered_titles = [record.get("title", "") for record in discovered[:1] if record.get("title")]
+    source_text = ""
+    if local_titles or discovered_titles:
+        joined = "; ".join(local_titles + discovered_titles)
+        source_text = f" Grounding was drawn from: {joined}."
+
+    if cls.lower() == "normal":
+        return (
+            f"Classifier identified this cell as {cls} with {confidence * 100:.1f}% confidence. "
+            f"The reconstructed morphology remains comparatively regular, and the decision is supported by {cue_text}. "
+            f"This remains a morphology-based assessment rather than a standalone biological conclusion.{source_text}"
+        )
+
+    return (
+        f"Classifier identified this cell as {cls} with {confidence * 100:.1f}% confidence. "
+        f"The anomaly decision is driven by {cue_text}, which makes the reconstructed cell depart from a smoother reference morphology. "
+        f"This interpretation is grounded in reconstructed 3D shape evidence and morphology literature, but it should not be treated as proof of a specific mutation or treatment indication.{source_text}"
+    )
 
 
 def unwrap_state_dict(checkpoint):
@@ -158,6 +356,12 @@ def load_resources():
         print("VAE модель загружена.")
     else:
         print("ПРЕДУПРЕЖДЕНИЕ: VAE модель не найдена (обучите через train_vae.py).")
+
+    # LLM availability check
+    if llm_available():
+        print("✓ Gemini LLM доступен")
+    else:
+        print("⚠ Gemini LLM недоступен — будет использован шаблонный fallback")
 
 
 @app.get("/api/cells")
@@ -377,9 +581,6 @@ def predict(filename: str):
         "diff": diff,
     }
 
-
-import json
-
 from PIL import Image
 import io
 import base64
@@ -425,6 +626,100 @@ def preview_projections(filename: str):
         return response
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Не удалось загрузить проекции: {str(e)}")
+
+
+@app.post("/api/agent/retrieve")
+def agent_retrieve(request: AgentRequest):
+    topics = morphology_topics(request.morphology, request.classification)
+    chunks, missing_topics = retrieve_local_rag(topics)
+    confidence = float((request.classification or {}).get("confidence", 0.0))
+    is_anomaly = str((request.classification or {}).get("class", "")).lower() == "anomaly"
+    used_fallback = bool(is_anomaly and (confidence < 0.9 or len(missing_topics) > 0))
+    return {
+        "topics": topics,
+        "chunks": chunks,
+        "missing_topics": missing_topics,
+        "used_fallback": used_fallback,
+        "coverage": "partial" if used_fallback else "strong",
+    }
+
+
+@app.post("/api/agent/search")
+def agent_search(request: AgentRequest):
+    missing_topics = request.missing_topics or []
+    discovered: list[dict[str, Any]] = []
+    for topic in missing_topics[:3]:
+        record = search_europe_pmc(topic)
+        if record is not None:
+            discovered.append(record)
+
+    synced = sync_discovered_records(discovered)
+    notice = None
+    if synced:
+        labels = ", ".join(record.get("title", "new literature") for record in synced[:2])
+        suffix = f" +{len(synced) - 2} more" if len(synced) > 2 else ""
+        notice = f"Agent found new knowledge entries: {labels}{suffix}. They were added to the local knowledge base."
+
+    return {
+        "discovered": discovered,
+        "synced": synced,
+        "notice": notice,
+    }
+
+
+@app.post("/api/agent/generate")
+def agent_generate(request: AgentRequest):
+    """Writer agent: structured morphology report via Gemini."""
+    all_chunks = (request.retrieved or []) + (request.discovered or [])
+    print(f"[agent/generate] chunks={len(all_chunks)}, llm_available={llm_available()}")
+    report = generate_report(
+        classification=request.classification or {},
+        morphology=request.morphology or {},
+        metrics=request.metrics or {},
+        chunks=all_chunks,
+        cell_type=request.cell_type or "",
+    )
+    if report is None:
+        print("[agent/generate] LLM returned None → using fallback")
+        explanation = build_grounded_explanation(
+            request.classification, request.morphology,
+            request.retrieved or [], request.discovered or [],
+        )
+        return {"report": None, "fallback_explanation": explanation, "llm_used": False}
+    print(f"[agent/generate] LLM report generated, keys={list(report.keys())}")
+    return {"report": report, "fallback_explanation": None, "llm_used": True}
+
+
+@app.post("/api/agent/verify")
+def agent_verify(request: AgentRequest):
+    """Verifier agent: validate draft report against RAG sources."""
+    all_chunks = (request.retrieved or []) + (request.discovered or [])
+    result = verify_report(
+        draft=request.draft_report or {},
+        chunks=all_chunks,
+        morphology=request.morphology or {},
+    )
+    if result is None:
+        return {"report": request.draft_report, "corrections": [], "verified": False}
+    corrections = result.pop("corrections", [])
+    return {"report": result, "corrections": corrections, "verified": True}
+
+
+@app.post("/api/agent/answer")
+def agent_answer(request: AgentRequest):
+    """Legacy fallback — template-based answer."""
+    retrieved = request.retrieved or []
+    discovered = request.discovered or []
+    explanation = build_grounded_explanation(
+        request.classification, request.morphology, retrieved, discovered,
+    )
+    return {
+        "explanation": explanation,
+        "references": [
+            {"title": r.get("title"), "url": r.get("url"), "source_type": r.get("source_type")}
+            for r in (retrieved + discovered)[:5]
+        ],
+    }
 
 
 @app.get("/api/metrics")

@@ -1,21 +1,25 @@
 import React from 'react'
 
 interface PipelineTrackerProps {
-  activeStage: number
+  activeStage?: number
+  stages?: StageDef[]
+  title?: string
+  subtitle?: string
 }
 
 interface StageDef {
   id: number
   label: string
-  locked: boolean
+  locked?: boolean
+  state?: 'completed' | 'active' | 'locked' | 'idle' | 'skipped'
 }
 
-const STAGES: StageDef[] = [
-  { id: 1, label: 'CNN', locked: false },
-  { id: 2, label: 'Refiner', locked: false },
-  { id: 3, label: 'Diffusion', locked: true },
-  { id: 4, label: 'Ensemble', locked: true },
-  { id: 5, label: 'Classify', locked: false },
+const DEFAULT_STAGES: StageDef[] = [
+  { id: 1, label: 'Encode' },
+  { id: 2, label: 'Lift 3D' },
+  { id: 3, label: 'Refine' },
+  { id: 4, label: 'Compare' },
+  { id: 5, label: 'Classify' },
 ]
 
 const CheckIcon = () => (
@@ -37,23 +41,28 @@ const ActiveDot = () => (
   </svg>
 )
 
-function getStageState(stageId: number, activeStage: number): 'completed' | 'active' | 'locked' | 'idle' {
-  if (STAGES.find(s => s.id === stageId)?.locked && stageId > activeStage) return 'locked'
+function getStageState(stageId: number, activeStage: number, stages: StageDef[]): 'completed' | 'active' | 'locked' | 'idle' | 'skipped' {
+  const stage = stages.find(s => s.id === stageId)
+  if (stage?.state) return stage.state
+  if (stage?.locked && stageId > activeStage) return 'locked'
   if (stageId < activeStage) return 'completed'
   if (stageId === activeStage) return 'active'
   return 'idle'
 }
 
-export default function PipelineTracker({ activeStage }: PipelineTrackerProps) {
+export default function PipelineTracker({ activeStage = 0, stages = DEFAULT_STAGES, title, subtitle }: PipelineTrackerProps) {
   const elements: React.JSX.Element[] = []
-  STAGES.forEach((stage, i) => {
-    const state = getStageState(stage.id, activeStage)
+  stages.forEach((stage, i) => {
+    const state = getStageState(stage.id, activeStage, stages)
     elements.push(
       <div key={`s${stage.id}`} className="pipeline-stage">
         <div className={`pipeline-circle ${state}`}>
           {state === 'completed' && <CheckIcon />}
           {state === 'active' && <ActiveDot />}
           {state === 'locked' && <LockIcon />}
+          {state === 'skipped' && (
+            <span style={{ width: 10, height: 1, background: 'currentColor', opacity: 0.45, display: 'block' }} />
+          )}
           {state === 'idle' && (
             <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--text-muted)', opacity: 0.3, display: 'block' }} />
           )}
@@ -61,17 +70,26 @@ export default function PipelineTracker({ activeStage }: PipelineTrackerProps) {
         <span className={`pipeline-label ${state}`}>{stage.label}</span>
       </div>
     )
-    if (i < STAGES.length - 1) {
+    if (i < stages.length - 1) {
+      const lineCompleted = ['completed', 'active', 'skipped'].includes(state)
       elements.push(
-        <div key={`l${stage.id}`} className={`pipeline-line ${stage.id < activeStage ? 'completed' : ''}`} />
+        <div key={`l${stage.id}`} className={`pipeline-line ${lineCompleted ? 'completed' : ''}`} />
       )
     }
   })
 
   return (
-    <div className="pipeline-bar">
-      <div className="pipeline-stages">
-        {elements}
+    <div className="pipeline-bar-wrap">
+      {(title || subtitle) && (
+        <div className="pipeline-meta">
+          {title && <div className="pipeline-title">{title}</div>}
+          {subtitle && <div className="pipeline-subtitle">{subtitle}</div>}
+        </div>
+      )}
+      <div className="pipeline-bar">
+        <div className="pipeline-stages">
+          {elements}
+        </div>
       </div>
     </div>
   )

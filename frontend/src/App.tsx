@@ -311,22 +311,112 @@ function Scene({ meshData, color, label, diffMesh, diffActive, overlay, onToggle
 
 interface CellInfo { filename: string; score: string; type: string }
 interface MetricDef { key: string; label: string; value: number | string; unit?: string }
-type PreviewMap = Record<string, string>
 
-interface PredictionEntry {
+interface TrackerStage {
   id: number
-  timestamp: string
-  filename: string
-  cellType: string
-  model: string
-  dice: number
-  iou: number
-  precision: number
-  recall: number
-  assd: number | null
-  hd95: number | null
-  volumeDiffPct: number | null
-  reprojectionL1: number | null
+  label: string
+  state?: 'completed' | 'active' | 'locked' | 'idle' | 'skipped'
+}
+
+interface AgentKnowledgeItem {
+  key: string
+  label: string
+  reason: string
+}
+
+interface AgentReference {
+  title: string
+  url: string
+  source_type: string
+}
+
+interface AgentDeviation {
+  metric: string
+  value: number
+  threshold: number
+  status: string
+  interpretation: string
+}
+
+interface AgentReport {
+  summary: string
+  classification_interpretation: string
+  key_deviations: AgentDeviation[]
+  normal_metrics: string[]
+  evidence: string[]
+  limitations: string[]
+  recommendation: string
+  corrections?: string[]
+}
+
+
+function buildReconstructionStages(): TrackerStage[] {
+  return [
+    { id: 1, label: 'Encode' },
+    { id: 2, label: 'Lift 3D' },
+    { id: 3, label: 'Refine' },
+    { id: 4, label: 'Compare' },
+    { id: 5, label: 'Classify' },
+  ]
+}
+
+function buildIdleAgentStages(): TrackerStage[] {
+  return [
+    { id: 1, label: 'RAG Base', state: 'idle' },
+    { id: 2, label: 'Search', state: 'idle' },
+    { id: 3, label: 'Generate', state: 'idle' },
+    { id: 4, label: 'Verify', state: 'idle' },
+    { id: 5, label: 'Answer', state: 'idle' },
+  ]
+}
+
+function buildAgentStages(progress: number, usedFallback: boolean): TrackerStage[] {
+  if (progress === 0) return buildIdleAgentStages()
+
+  if (!usedFallback) {
+    return [
+      { id: 1, label: 'RAG Base', state: progress > 1 ? 'completed' : 'active' },
+      { id: 2, label: 'Search', state: progress >= 2 ? 'skipped' : 'idle' },
+      { id: 3, label: 'Generate', state: progress > 3 ? 'completed' : progress === 3 ? 'active' : 'idle' },
+      { id: 4, label: 'Verify', state: progress > 4 ? 'completed' : progress === 4 ? 'active' : 'idle' },
+      { id: 5, label: 'Answer', state: progress >= 6 ? 'completed' : progress === 5 ? 'active' : 'idle' },
+    ]
+  }
+
+  return [
+    { id: 1, label: 'RAG Base', state: progress > 1 ? 'completed' : 'active' },
+    { id: 2, label: 'Search', state: progress > 2 ? 'completed' : progress === 2 ? 'active' : 'idle' },
+    { id: 3, label: 'Generate', state: progress > 3 ? 'completed' : progress === 3 ? 'active' : 'idle' },
+    { id: 4, label: 'Verify', state: progress > 4 ? 'completed' : progress === 4 ? 'active' : 'idle' },
+    { id: 5, label: 'Answer', state: progress >= 6 ? 'completed' : progress === 5 ? 'active' : 'idle' },
+  ]
+}
+
+function buildMorphologyExplanation(data: any): string {
+  if (!data?.classification || !data?.morphology) return ''
+
+  const cls = String(data.classification.class ?? 'Unknown')
+  const confidence = Number(data.classification.confidence ?? 0)
+  const m = data.morphology
+  const cues: string[] = []
+
+  if (Number(m.sphericity) <= 0.84) cues.push('reduced spherical regularity')
+  if (Number(m.convexity) <= 0.965) cues.push('loss of a smooth convex envelope')
+  if (Number(m.eccentricity) >= 0.68) cues.push('pronounced elongation and asymmetry')
+  if (Number(m.surface_roughness) >= 0.11) cues.push('elevated surface roughness')
+  if (Number(m.volume) >= 18000) cues.push('larger-than-typical reconstructed volume')
+
+  const cueText = cues.length > 0
+    ? cues.length === 1
+      ? cues[0]
+      : `${cues.slice(0, -1).join(', ')} and ${cues[cues.length - 1]}`
+    : 'the combined latent structure and 3D morphometric signature'
+
+  if (cls.toLowerCase() === 'normal') {
+    return `Classifier identified this cell as ${cls} with ${(confidence * 100).toFixed(1)}% confidence. The generated 3D morphology remains comparatively regular, and the decision is supported by ${cueText}. This should still be treated as a morphology-based assessment rather than a standalone biological conclusion.`
+  }
+
+  return `Classifier identified this cell as ${cls} with ${(confidence * 100).toFixed(1)}% confidence. The anomaly decision is driven by ${cueText}, which makes the reconstructed cell depart from a smoother reference morphology. This remains a morphology-based interpretation grounded in the reconstructed 3D shape and extracted geometric features, not a direct claim about a specific mutation or treatment.`
 }
 
 const API = import.meta.env.VITE_API_BASE_URL || ''
@@ -346,6 +436,14 @@ function App() {
   const [pipelineState, setPipelineState] = useState<number>(0)
   const [vaeRaw, setVaeRaw] = useState<any>(null)
   const [preview, setPreview] = useState<any>(null)
+  const [knowledgeNotice, setKnowledgeNotice] = useState<string | null>(null)
+  const [agentPipelineState, setAgentPipelineState] = useState<number>(0)
+  const [agentUsedFallback, setAgentUsedFallback] = useState(false)
+  const [agentDiscovered, setAgentDiscovered] = useState<AgentKnowledgeItem[]>([])
+  const [agentExplanation, setAgentExplanation] = useState<string>('')
+  const [agentReferences, setAgentReferences] = useState<AgentReference[]>([])
+  const [agentReport, setAgentReport] = useState<AgentReport | null>(null)
+  const [agentCorrections, setAgentCorrections] = useState<string[]>([])
 
   useEffect(() => {
     axios.get(`${API}/api/cells`).then(res => {
@@ -407,6 +505,14 @@ function App() {
   useEffect(() => {
     if (!selectedCell) return
     setOverlay(false)
+    setKnowledgeNotice(null)
+    setAgentPipelineState(0)
+    setAgentUsedFallback(false)
+    setAgentDiscovered([])
+    setAgentExplanation('')
+    setAgentReferences([])
+    setAgentReport(null)
+    setAgentCorrections([])
     axios.get(`${API}/api/preview/${selectedCell}`)
       .then(res => setPreview(res.data))
       .catch(console.error)
@@ -417,15 +523,22 @@ function App() {
     setLoading(true)
     setCnnData(null)
     setVaeData(null)
+    setKnowledgeNotice(null)
+    setAgentPipelineState(0)
+    setAgentUsedFallback(false)
+    setAgentDiscovered([])
+    setAgentExplanation('')
+    setAgentReferences([])
+    setAgentReport(null)
+    setAgentCorrections([])
     setPipelineState(1)
 
     // Simulate pipeline traversal visually
     const timer = setInterval(() => {
       setPipelineState(prev => {
-        if (prev === 1) return 2
-        // Jump from 2 (Refiner) directly to 5 (Classify) since Diffusion/Ensemble are locked for CNN
-        if (prev === 2) return 5
-        return prev
+        if (prev >= 5) return prev
+        if (prev === 0) return 1
+        return prev + 1
       })
     }, 600)
 
@@ -437,10 +550,105 @@ function App() {
 
       const [cnnRes, vaeRes] = await Promise.all([cnnPromise, vaePromise])
       clearInterval(timer)
-      setPipelineState(6) // Finished all stages
+      setPipelineState(5)
 
       setCnnData(cnnRes.data)
       if (vaeRes) setVaeData(vaeRes.data)
+
+      if (cnnRes.data?.classification && cnnRes.data?.morphology) {
+        const cellInfo2 = cells.find(c => c.filename === selectedCell)
+        const cnnMetrics = cnnRes.data.metrics ?? {}
+
+        // Stage 1: RAG Retrieve
+        setAgentPipelineState(1)
+        const retrieveRes = await axios.post(`${API}/api/agent/retrieve`, {
+          filename: selectedCell,
+          classification: cnnRes.data.classification,
+          morphology: cnnRes.data.morphology,
+        })
+
+        const usedFallback = !!retrieveRes.data?.used_fallback
+        setAgentUsedFallback(usedFallback)
+
+        // Stage 2: Search (if needed)
+        let discoveredRecords: any[] = []
+        if (usedFallback) {
+          setAgentPipelineState(2)
+          const searchRes = await axios.post(`${API}/api/agent/search`, {
+            filename: selectedCell,
+            missing_topics: retrieveRes.data?.missing_topics ?? [],
+          })
+          discoveredRecords = searchRes.data?.discovered ?? []
+          const discoveredUi = (searchRes.data?.synced ?? discoveredRecords).map((record: any) => ({
+            key: record.id ?? record.source_id ?? record.title,
+            label: record.title,
+            reason: `Fallback evidence for: ${(record.topics ?? []).join(', ') || 'morphology'}.`,
+          }))
+          setAgentDiscovered(discoveredUi)
+          if (searchRes.data?.notice) setKnowledgeNotice(searchRes.data.notice)
+        } else {
+          setAgentDiscovered([])
+        }
+
+        // Stage 3: Generate (Writer Agent — Gemini)
+        setAgentPipelineState(3)
+        const allChunks = [...(retrieveRes.data?.chunks ?? []), ...discoveredRecords]
+        const generateRes = await axios.post(`${API}/api/agent/generate`, {
+          filename: selectedCell,
+          classification: cnnRes.data.classification,
+          morphology: cnnRes.data.morphology,
+          metrics: {
+            dice: cnnMetrics.dice ?? cnnRes.data.dice,
+            iou: cnnMetrics.iou,
+            precision: cnnMetrics.precision,
+            recall: cnnMetrics.recall,
+            surface_assd: cnnMetrics.surface_assd,
+            surface_hd95: cnnMetrics.surface_hd95,
+            volume_diff_pct: cnnMetrics.volume_diff_pct,
+            reprojection_l1: cnnMetrics.reprojection_l1,
+          },
+          cell_type: cellInfo2?.type ?? '',
+          retrieved: retrieveRes.data?.chunks ?? [],
+          discovered: discoveredRecords,
+        })
+
+        if (generateRes.data?.llm_used && generateRes.data?.report) {
+          // Stage 4: Verify (Verifier Agent — Gemini)
+          setAgentPipelineState(4)
+          const verifyRes = await axios.post(`${API}/api/agent/verify`, {
+            filename: selectedCell,
+            classification: cnnRes.data.classification,
+            morphology: cnnRes.data.morphology,
+            draft_report: generateRes.data.report,
+            retrieved: retrieveRes.data?.chunks ?? [],
+            discovered: discoveredRecords,
+          })
+
+          // Stage 5: Answer
+          setAgentPipelineState(5)
+          const finalReport = verifyRes.data?.report ?? generateRes.data.report
+          setAgentReport(finalReport)
+          setAgentCorrections(verifyRes.data?.corrections ?? [])
+          setAgentExplanation(finalReport.summary ?? '')
+          // Build references from RAG chunks
+          setAgentReferences(allChunks.slice(0, 5).map((c: any) => ({
+            title: c.title ?? '',
+            url: c.url ?? '',
+            source_type: c.source_type ?? '',
+          })))
+        } else {
+          // LLM unavailable — use fallback template
+          setAgentPipelineState(5)
+          setAgentExplanation(generateRes.data?.fallback_explanation ?? '')
+          setAgentReport(null)
+          setAgentReferences(allChunks.slice(0, 5).map((c: any) => ({
+            title: c.title ?? '',
+            url: c.url ?? '',
+            source_type: c.source_type ?? '',
+          })))
+        }
+        setAgentPipelineState(6)
+      }
 
       const cellInfo = cells.find(c => c.filename === selectedCell)
       const now = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -486,6 +694,7 @@ function App() {
       alert('Backend error. Is FastAPI running on :8000?')
       clearInterval(timer)
       setPipelineState(0)
+      setAgentPipelineState(0)
     } finally {
       setLoading(false)
     }
@@ -510,6 +719,32 @@ function App() {
       { key: 'm_rg', label: 'Roughness', value: data.morphology.surface_roughness },
     ] : [])
   ] : []
+
+  const reconstructionStages = useMemo(() => buildReconstructionStages(), [])
+  const agentWorkflow = useMemo(() => ({
+    stages: buildAgentStages(agentPipelineState, agentUsedFallback),
+    usedFallback: agentUsedFallback,
+    discovered: agentDiscovered,
+  }), [agentPipelineState, agentUsedFallback, agentDiscovered])
+  const morphologyExplanation = useMemo(() => agentExplanation || buildMorphologyExplanation(cnnData), [agentExplanation, cnnData])
+  const agentLoading = agentPipelineState > 0 && agentPipelineState < 6
+
+  const agentStatusText = useMemo(() => {
+    switch (agentPipelineState) {
+      case 1: return 'Searching knowledge base…'
+      case 2: return 'Searching scientific literature…'
+      case 3: return 'Generating morphology report (LLM)…'
+      case 4: return 'Verifying report accuracy (LLM)…'
+      case 5: return 'Finalising analysis…'
+      default: return ''
+    }
+  }, [agentPipelineState])
+
+  useEffect(() => {
+    if (!knowledgeNotice) return
+    const timeout = window.setTimeout(() => setKnowledgeNotice(null), 5000)
+    return () => window.clearTimeout(timeout)
+  }, [knowledgeNotice])
 
   const hasResults = cnnData || vaeData
   const [overlay, setOverlay] = useState(false)
@@ -575,7 +810,19 @@ function App() {
               </div>
 
               <div className="top-block-pipeline">
-                <PipelineTracker activeStage={pipelineState} />
+                <PipelineTracker
+                  title="1. Reconstruction + Classification"
+                  activeStage={pipelineState}
+                  stages={reconstructionStages}
+                />
+                <div className="pipeline-secondary-block">
+                  <div className="pipeline-stack-divider" />
+                    <PipelineTracker
+                      title="2. Agent + RAG"
+                      subtitle="Retrieve → Search → Generate (LLM) → Verify (LLM) → Answer"
+                      stages={agentWorkflow.stages}
+                    />
+                </div>
               </div>
             </section>
 
@@ -681,10 +928,110 @@ function App() {
                   </div>
                 </div>
 
-                <div className="morpho-explanation">
-                  Classifier identified this cell as <strong>{cnnData.classification.class}</strong> with <strong>{(cnnData.classification.confidence * 100).toFixed(1)}%</strong> confidence. 
-                  This prediction is based on the multi-layer perceptron (MLP) processing the latent structural representation combined with explicit 3D morphometric features extracted from the generated shape.
-                </div>
+                {agentReport ? (
+                  <div className="morpho-report">
+                    <div className="morpho-report-section morpho-report-summary">
+                      <div className="morpho-report-section-icon">✦</div>
+                      <div>{agentReport.summary}</div>
+                    </div>
+
+                    {agentReport.classification_interpretation && (
+                      <div className="morpho-report-section">
+                        <div className="morpho-report-section-title">Classification Interpretation</div>
+                        <div className="morpho-report-section-text">{agentReport.classification_interpretation}</div>
+                      </div>
+                    )}
+
+                    {agentReport.key_deviations.length > 0 && (
+                      <div className="morpho-report-section">
+                        <div className="morpho-report-section-title">Key Deviations</div>
+                        <div className="morpho-deviations-grid">
+                          {agentReport.key_deviations.map((d, i) => (
+                            <div key={i} className={`morpho-deviation-card ${d.status}`}>
+                              <div className="morpho-deviation-header">
+                                <span className="morpho-deviation-metric">{d.metric}</span>
+                                <span className={`morpho-deviation-badge ${d.status}`}>{d.status}</span>
+                              </div>
+                              <div className="morpho-deviation-values">
+                                <span>Value: <strong>{typeof d.value === 'number' ? d.value.toFixed(4) : d.value}</strong></span>
+                                <span>Threshold: {typeof d.threshold === 'number' ? d.threshold.toFixed(4) : d.threshold}</span>
+                              </div>
+                              <div className="morpho-deviation-interp">{d.interpretation}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {agentReport.normal_metrics.length > 0 && (
+                      <div className="morpho-report-section">
+                        <div className="morpho-report-section-title">Normal Metrics</div>
+                        <div className="morpho-normal-list">
+                          {agentReport.normal_metrics.map((m, i) => (
+                            <span key={i} className="morpho-normal-tag">✓ {m}</span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {agentReport.evidence.length > 0 && (
+                      <div className="morpho-report-section">
+                        <div className="morpho-report-section-title">Evidence</div>
+                        {agentReport.evidence.map((e, i) => (
+                          <div key={i} className="morpho-evidence-item">"{e}"</div>
+                        ))}
+                      </div>
+                    )}
+
+                    {agentReport.limitations.length > 0 && (
+                      <div className="morpho-report-section morpho-report-limitations">
+                        <div className="morpho-report-section-title">⚠ Limitations</div>
+                        <ul>
+                          {agentReport.limitations.map((l, i) => <li key={i}>{l}</li>)}
+                        </ul>
+                      </div>
+                    )}
+
+                    {agentReport.recommendation && (
+                      <div className="morpho-report-section morpho-report-recommendation">
+                        <div className="morpho-report-section-title">Recommendation</div>
+                        <div className="morpho-report-section-text">{agentReport.recommendation}</div>
+                      </div>
+                    )}
+
+                    {agentCorrections.length > 0 && (
+                      <div className="morpho-report-section morpho-report-corrections">
+                        <div className="morpho-report-section-title">🔍 Verifier Corrections</div>
+                        <ul>
+                          {agentCorrections.map((c, i) => <li key={i}>{c}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                ) : agentLoading ? (
+                  <div className="morpho-agent-loading">
+                    <div className="morpho-agent-spinner" />
+                    <div className="morpho-agent-status">{agentStatusText}</div>
+                  </div>
+                ) : morphologyExplanation ? (
+                  <div className="morpho-explanation">
+                    {morphologyExplanation}
+                  </div>
+                ) : null}
+
+                {agentReferences.length > 0 && (
+                  <div className="morpho-references">
+                    <div className="morpho-references-title">Grounding Sources</div>
+                    <div className="morpho-references-list">
+                      {agentReferences.map((ref, idx) => (
+                        <a key={`${ref.title}-${idx}`} href={ref.url} target="_blank" rel="noreferrer" className="morpho-reference-item">
+                          <span className="morpho-reference-title">{ref.title}</span>
+                          <span className="morpho-reference-type">{ref.source_type}</span>
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </section>
             )}
 
@@ -960,6 +1307,21 @@ function App() {
           </main>
         )}
       </div>
+      {knowledgeNotice && (
+        <div className="knowledge-toast">
+          <div className="knowledge-toast-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z" />
+              <path d="M12 7v5" />
+              <path d="M12 16h.01" />
+            </svg>
+          </div>
+          <div className="knowledge-toast-body">
+            <div className="knowledge-toast-title">Knowledge Sync Event</div>
+            <div className="knowledge-toast-text">{knowledgeNotice}</div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
