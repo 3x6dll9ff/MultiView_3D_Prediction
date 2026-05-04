@@ -5,7 +5,7 @@ Two-agent architecture:
   1. Writer  — generates structured report from data + RAG context.
   2. Verifier — validates the draft against RAG sources, corrects overclaiming.
 
-Uses the ``google-genai`` SDK with ``gemini-2.5-flash``.
+Uses the ``google-genai`` SDK with either Gemini API key auth or Vertex AI.
 """
 
 import json
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 _client = None
 
-MODEL_NAME = "gemini-2.5-flash"
+MODEL_NAME = os.environ.get("VERTEX_AI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash"
 
 # ---------------------------------------------------------------------------
 # System prompts
@@ -90,15 +90,28 @@ def _get_client():
     if _client is not None:
         return _client
 
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        logger.warning("GEMINI_API_KEY not set — LLM features disabled")
-        return None
-
     try:
         from google import genai
+
+        use_vertex = os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").lower() in {"1", "true", "yes"}
+        project = os.environ.get("VERTEX_AI_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT")
+        location = os.environ.get("VERTEX_AI_LOCATION") or os.environ.get("GOOGLE_CLOUD_LOCATION") or "global"
+
+        if use_vertex or project:
+            if not project:
+                logger.warning("VERTEX_AI_PROJECT/GOOGLE_CLOUD_PROJECT not set — Vertex AI LLM disabled")
+                return None
+            _client = genai.Client(vertexai=True, project=project, location=location)
+            logger.info("Vertex AI Gemini client initialised (model=%s, location=%s)", MODEL_NAME, location)
+            return _client
+
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            logger.warning("No Vertex AI project or GEMINI_API_KEY set — LLM features disabled")
+            return None
+
         _client = genai.Client(api_key=api_key)
-        logger.info("Gemini client initialised (%s)", MODEL_NAME)
+        logger.info("Gemini API client initialised (%s)", MODEL_NAME)
         return _client
     except Exception as e:
         logger.error("Failed to initialise Gemini client: %s", e)
@@ -155,17 +168,28 @@ def _call_gemini(system_prompt: str, user_prompt: str, temperature: float = 0.3)
 
     from google.genai import types
 
-    response = client.models.generate_content(
-        model=MODEL_NAME,
-        contents=user_prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            response_mime_type="application/json",
-            temperature=temperature,
-            max_output_tokens=16384,
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
-        ),
+    config_kwargs: dict[str, Any] = dict(
+        system_instruction=system_prompt,
+        response_mime_type="application/json",
+        temperature=temperature,
+        max_output_tokens=16384,
     )
+    if not MODEL_NAME.startswith("gemini-3"):
+        config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+
+    try:
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=user_prompt,
+            config=types.GenerateContentConfig(**config_kwargs),
+        )
+    except Exception:
+        config_kwargs.pop("thinking_config", None)
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=user_prompt,
+            config=types.GenerateContentConfig(**config_kwargs),
+        )
 
     raw = response.text
     if not raw or not raw.strip():
@@ -175,6 +199,13 @@ def _call_gemini(system_prompt: str, user_prompt: str, temperature: float = 0.3)
     try:
         return json.loads(raw.strip())
     except json.JSONDecodeError as e:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                return json.loads(raw[start:end + 1])
+            except json.JSONDecodeError:
+                pass
         logger.error("JSON parse error: %s — raw[:%d]: %s", e, min(200, len(raw)), raw[:200])
         raise
 

@@ -12,6 +12,7 @@ services:
       - ./src:/app/src
       - ./data:/app/data
       - ./results:/app/results:ro
+      - ./secrets:/app/secrets:ro
     restart: unless-stopped
 
   frontend:
