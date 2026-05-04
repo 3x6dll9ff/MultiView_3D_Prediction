@@ -28,19 +28,23 @@ You are a senior morphology analysis expert for a 3D cell reconstruction system.
 Produce a structured, professional morphological analysis report based on the provided data.
 
 RULES:
-1. Use morphology-first language. NEVER claim specific mutations, diagnoses, or treatments.
-2. Use cautious phrasing: "consistent with", "may indicate", "associated with".
-3. Reference retrieved scientific sources naturally. Use their content to support claims.
-4. Include specific numeric values for every metric you discuss.
-5. Acknowledge limitations of morphology-only analysis explicitly.
-6. Write in English, professional scientific register.
+1. Use morphology-first language only. NEVER claim or imply a diagnosis, cancer state, tumor state, mutation, disease, treatment, or clinical recommendation.
+2. Avoid clinical follow-up language such as "molecular diagnostics", "molecular drivers", "histological staining", "patient", "disease", "tumor", or "cancer" unless it appears only inside a source title.
+3. Use cautious technical phrasing: "shape irregularity", "reconstruction-derived feature", "morphology-based anomaly", "requires domain validation".
+4. Reference retrieved scientific sources naturally, but do not copy their disease framing into the conclusion.
+5. Include specific numeric values for every metric you discuss.
+6. Acknowledge limitations of morphology-only and reconstruction-derived analysis explicitly.
+7. Write in English, professional scientific register.
 
 METRIC THRESHOLDS:
-- Surface Roughness >= 0.11 → elevated
+- Surface Roughness >= 3.0 vox → elevated reconstruction-derived surface variability
 - Convexity <= 0.965 → reduced
 - Sphericity <= 0.84 → reduced
-- Eccentricity >= 0.68 → elevated
+- Eccentricity is PCA min/max axis ratio: <= 0.40 → elongated/anisotropic; higher values are more compact
 - Volume >= 18000 vx → enlarged
+
+RECOMMENDATION RULE:
+Recommend only technical validation steps, e.g. inspect input projections, compare against ground-truth or additional views, rerun reconstruction, or validate with domain expert review. Do not recommend medical tests.
 
 OUTPUT: respond with a single JSON object:
 {
@@ -60,11 +64,12 @@ You are a scientific verifier for morphology analysis reports.
 Review the draft report against the provided RAG sources and actual metric values.
 
 CHECKLIST:
-1. OVERCLAIMING — soften any diagnostic / mutation / treatment claims.
+1. OVERCLAIMING — remove diagnostic, mutation, cancer, tumor, treatment, molecular testing, or clinical follow-up claims.
 2. NUMERIC ACCURACY — verify cited values match actual data.
-3. SOURCE ALIGNMENT — ensure evidence is supported by provided RAG chunks.
+3. SOURCE ALIGNMENT — ensure evidence is supported by provided RAG chunks without importing disease-specific framing into the conclusion.
 4. COMPLETENESS — expand limitations if needed.
 5. TONE — ensure cautious, professional language.
+6. METRIC SEMANTICS — sphericity is capped at 1.0; eccentricity is min/max PCA axis ratio where lower values mean greater elongation.
 
 OUTPUT: respond with a single JSON object identical in structure to the draft
 plus a "corrections" array listing every change you made (empty if none):
@@ -153,10 +158,64 @@ _REPORT_DEFAULTS: dict[str, Any] = {
     "recommendation": "",
 }
 
+_FORBIDDEN_REPORT_TERMS = (
+    "cancer",
+    "tumor",
+    "neoplasm",
+    "disease",
+    "diagnosis",
+    "diagnostic",
+    "mutation",
+    "molecular",
+    "treatment",
+    "molecular diagnostics",
+    "histological staining",
+    "patient",
+)
+
 
 def _ensure_fields(report: dict[str, Any]) -> dict[str, Any]:
     for key, default in _REPORT_DEFAULTS.items():
         report.setdefault(key, default)
+    return report
+
+
+def _contains_forbidden_term(text: str) -> bool:
+    lowered = text.lower()
+    return any(term in lowered for term in _FORBIDDEN_REPORT_TERMS)
+
+
+def _filter_strings(values: list[Any]) -> list[Any]:
+    return [value for value in values if not isinstance(value, str) or not _contains_forbidden_term(value)]
+
+
+def _sanitize_report(report: dict[str, Any]) -> dict[str, Any]:
+    """Remove clinical overclaiming that can leak in through biomedical RAG."""
+    for key in ("summary", "classification_interpretation"):
+        if isinstance(report.get(key), str) and _contains_forbidden_term(report[key]):
+            report[key] = "The reconstruction shows morphology-based atypia relative to smoother reference shapes, driven by reconstruction-derived geometric features."
+
+    if isinstance(report.get("recommendation"), str) and _contains_forbidden_term(report["recommendation"]):
+        report["recommendation"] = (
+            "Validate the interpretation by reviewing the input projections, comparing against additional reconstructed examples, "
+            "and confirming whether the observed shape deviations are reproducible."
+        )
+
+    for key in ("evidence", "limitations", "normal_metrics", "corrections"):
+        if isinstance(report.get(key), list):
+            report[key] = _filter_strings(report[key])
+
+    deviations = report.get("key_deviations")
+    if isinstance(deviations, list):
+        for item in deviations:
+            if isinstance(item, dict) and isinstance(item.get("interpretation"), str) and _contains_forbidden_term(item["interpretation"]):
+                item["interpretation"] = "This reconstruction-derived metric indicates a geometric departure from smoother reference morphology."
+
+    limitations = report.setdefault("limitations", [])
+    if isinstance(limitations, list):
+        required = "This is a morphology-only, reconstruction-derived assessment and is not diagnostic."
+        if required not in limitations:
+            limitations.append(required)
     return report
 
 
@@ -245,7 +304,7 @@ def generate_report(
         report = _call_gemini(WRITER_SYSTEM_PROMPT, user_prompt, temperature=0.3)
         if report is None:
             return None
-        return _ensure_fields(report)
+        return _sanitize_report(_ensure_fields(report))
     except Exception as e:
         logger.error("Writer agent failed: %s", e)
         return None
@@ -277,7 +336,7 @@ def verify_report(
         if result is None:
             return None
         result.setdefault("corrections", [])
-        return _ensure_fields(result)
+        return _sanitize_report(_ensure_fields(result))
     except Exception as e:
         logger.error("Verifier agent failed: %s", e)
         return None

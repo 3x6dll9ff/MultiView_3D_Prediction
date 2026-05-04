@@ -48,6 +48,26 @@ CLASSIFIER_PATH = "results/best_classifier.pt"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RAG_PATH = PROJECT_ROOT / "data" / "rag" / "morphology_sources.jsonl"
 RAG_DISCOVERED_PATH = PROJECT_ROOT / "data" / "rag" / "morphology_discovered.jsonl"
+FORBIDDEN_RAG_TERMS = (
+    "cancer",
+    "tumor",
+    "neoplasm",
+    "neoplastic",
+    "preneoplastic",
+    "lesion",
+    "cytologic",
+    "dysplastic",
+    "metaplastic",
+    "malignan",
+    "metast",
+    "oncolog",
+    "patholog",
+    "diagnos",
+    "molecular",
+    "prognos",
+    "patient",
+    "treatment",
+)
 
 model = None
 vae_model = None
@@ -86,6 +106,15 @@ def load_jsonl_records(path: Path) -> list[dict[str, Any]]:
     return records
 
 
+def is_safe_morphology_source(record: dict[str, Any]) -> bool:
+    """Keep RAG grounding morphology-only and non-clinical for this demo."""
+    text = " ".join(
+        str(record.get(key, ""))
+        for key in ("title", "content", "limitations", "follow_up", "source_type")
+    ).lower()
+    return not any(term in text for term in FORBIDDEN_RAG_TERMS)
+
+
 def append_jsonl_record(path: Path, record: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as file:
@@ -97,14 +126,14 @@ def morphology_topics(morphology: dict[str, float] | None, classification: dict[
     morphology = morphology or {}
     if classification and str(classification.get("class", "")).lower() == "anomaly":
         topics.extend(["morphology_based_anomaly", "limitations"])
-    if float(morphology.get("surface_roughness", 0.0)) >= 0.11:
+    if float(morphology.get("surface_roughness", 0.0)) >= 3.0:
         topics.append("surface_roughness")
     if float(morphology.get("convexity", 1.0)) <= 0.965:
         topics.append("convexity")
         topics.append("irregular_shape")
     if float(morphology.get("sphericity", 1.0)) <= 0.84:
         topics.append("sphericity")
-    if float(morphology.get("eccentricity", 0.0)) >= 0.68:
+    if float(morphology.get("eccentricity", 1.0)) <= 0.40:
         topics.append("eccentricity")
         topics.append("asymmetry")
     if float(morphology.get("volume", 0.0)) >= 18000:
@@ -113,7 +142,11 @@ def morphology_topics(morphology: dict[str, float] | None, classification: dict[
 
 
 def retrieve_local_rag(topics: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
-    records = load_jsonl_records(RAG_PATH) + load_jsonl_records(RAG_DISCOVERED_PATH)
+    records = [
+        record
+        for record in (load_jsonl_records(RAG_PATH) + load_jsonl_records(RAG_DISCOVERED_PATH))
+        if is_safe_morphology_source(record)
+    ]
     if not records:
         return [], topics
 
@@ -136,15 +169,15 @@ def retrieve_local_rag(topics: list[str]) -> tuple[list[dict[str, Any]], list[st
 
 
 TOPIC_SEARCH_QUERIES = {
-    "surface_roughness": 'cell morphology surface roughness cancer review',
+    "surface_roughness": 'cell morphology surface roughness cytoskeleton review',
     "convexity": 'cell shape convexity solidity morphology review',
-    "irregular_shape": 'irregular cell shape morphology atypia review',
-    "sphericity": 'cell sphericity morphology abnormality review',
-    "eccentricity": 'cell eccentricity morphology review',
-    "asymmetry": 'cell asymmetry morphology review',
-    "morphology_based_anomaly": 'cell morphology atypia abnormal morphology review',
-    "limitations": 'cell morphology alone limitations molecular follow up review',
-    "biological_implications": 'cell morphology abnormality biological implications review',
+    "irregular_shape": 'irregular cell shape morphology review',
+    "sphericity": 'cell sphericity morphology shape analysis review',
+    "eccentricity": 'cell elongation eccentricity morphology review',
+    "asymmetry": 'cell shape asymmetry morphology review',
+    "morphology_based_anomaly": 'cell morphology shape analysis anomaly review',
+    "limitations": 'cell morphology analysis limitations reconstruction review',
+    "biological_implications": 'cell shape morphology cytoskeleton biological implications review',
 }
 
 
@@ -188,6 +221,8 @@ def search_europe_pmc(topic: str) -> dict[str, Any] | None:
         "limitations": "This record was auto-discovered at runtime and should be treated as supporting evidence until manually curated.",
         "follow_up": "Use as fallback grounding when the local RAG base lacks topic coverage.",
     }
+    if not is_safe_morphology_source(record):
+        return None
     return record
 
 
@@ -195,6 +230,8 @@ def sync_discovered_records(records: list[dict[str, Any]]) -> list[dict[str, Any
     existing = {record.get("id") for record in load_jsonl_records(RAG_DISCOVERED_PATH)}
     synced: list[dict[str, Any]] = []
     for record in records:
+        if not is_safe_morphology_source(record):
+            continue
         if record.get("id") in existing:
             continue
         append_jsonl_record(RAG_DISCOVERED_PATH, record)
@@ -218,9 +255,9 @@ def build_grounded_explanation(
         cues.append("reduced spherical regularity")
     if float(morphology.get("convexity", 1.0)) <= 0.965:
         cues.append("loss of a smooth convex envelope")
-    if float(morphology.get("eccentricity", 0.0)) >= 0.68:
-        cues.append("pronounced elongation and asymmetry")
-    if float(morphology.get("surface_roughness", 0.0)) >= 0.11:
+    if float(morphology.get("eccentricity", 1.0)) <= 0.40:
+        cues.append("pronounced elongation or anisotropy")
+    if float(morphology.get("surface_roughness", 0.0)) >= 3.0:
         cues.append("elevated surface roughness")
     if float(morphology.get("volume", 0.0)) >= 18000:
         cues.append("increased reconstructed volume")
@@ -242,7 +279,7 @@ def build_grounded_explanation(
     return (
         f"Classifier identified this cell as {cls} with {confidence * 100:.1f}% confidence. "
         f"The anomaly decision is driven by {cue_text}, which makes the reconstructed cell depart from a smoother reference morphology. "
-        f"This interpretation is grounded in reconstructed 3D shape evidence and morphology literature, but it should not be treated as proof of a specific mutation or treatment indication.{source_text}"
+        f"This interpretation is grounded in reconstructed 3D shape evidence and morphology literature, but it should not be treated as a diagnosis or evidence of a specific biological mechanism.{source_text}"
     )
 
 
@@ -670,7 +707,10 @@ def agent_search(request: AgentRequest):
 @app.post("/api/agent/generate")
 def agent_generate(request: AgentRequest):
     """Writer agent: structured morphology report via Gemini."""
-    all_chunks = (request.retrieved or []) + (request.discovered or [])
+    all_chunks = [
+        chunk for chunk in ((request.retrieved or []) + (request.discovered or []))
+        if is_safe_morphology_source(chunk)
+    ]
     print(f"[agent/generate] chunks={len(all_chunks)}, llm_available={llm_available()}")
     report = generate_report(
         classification=request.classification or {},
@@ -693,7 +733,10 @@ def agent_generate(request: AgentRequest):
 @app.post("/api/agent/verify")
 def agent_verify(request: AgentRequest):
     """Verifier agent: validate draft report against RAG sources."""
-    all_chunks = (request.retrieved or []) + (request.discovered or [])
+    all_chunks = [
+        chunk for chunk in ((request.retrieved or []) + (request.discovered or []))
+        if is_safe_morphology_source(chunk)
+    ]
     result = verify_report(
         draft=request.draft_report or {},
         chunks=all_chunks,
@@ -708,8 +751,8 @@ def agent_verify(request: AgentRequest):
 @app.post("/api/agent/answer")
 def agent_answer(request: AgentRequest):
     """Legacy fallback — template-based answer."""
-    retrieved = request.retrieved or []
-    discovered = request.discovered or []
+    retrieved = [r for r in (request.retrieved or []) if is_safe_morphology_source(r)]
+    discovered = [r for r in (request.discovered or []) if is_safe_morphology_source(r)]
     explanation = build_grounded_explanation(
         request.classification, request.morphology, retrieved, discovered,
     )

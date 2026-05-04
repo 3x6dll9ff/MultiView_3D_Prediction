@@ -34,7 +34,9 @@ def compute_sphericity(volume: float, surface_area: float) -> float:
     if surface_area < 1e-6:
         return 0.0
     numerator = (np.pi ** (1 / 3)) * ((6 * volume) ** (2 / 3))
-    return float(numerator / surface_area)
+    # Boundary-voxel surface area is a discrete approximation and can slightly
+    # underestimate true surface area, so clamp to the physical upper bound.
+    return float(np.clip(numerator / surface_area, 0.0, 1.0))
 
 
 def compute_convexity(voxel: np.ndarray, threshold: float = 0.5) -> float:
